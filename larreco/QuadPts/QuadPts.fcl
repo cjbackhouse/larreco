@@ -1,0 +1,13 @@
+BEGIN_PROLOG
+
+standard_quadpts:
+{
+  module_type: "QuadPts"
+
+#  HitLabel: "gaushit"
+#  HitLabel: "dcheat" # cheat disambiguated
+  HitLabel: "hitfd" # real triplet-matching disambiguation
+}
+
+END_PROLOG
+

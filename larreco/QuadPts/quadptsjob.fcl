@@ -1,0 +1,43 @@
+#include "services_dune.fcl"
+
+#include "QuadPts.fcl"
+
+process_name: QuadPts
+
+source:
+{
+  module_type: RootInput
+}
+
+services:
+{
+  TFileService: { fileName: "quadpts_hist.root" }
+  TimeTracker:       {}
+#  RandomNumberGenerator: {} #ART native random number generator
+
+  @table::dunefd_services
+}
+
+# We don't use these, they potentially slow things down, and PhotonBackTracker
+# spams the output, so remove them from the standard services.
+#services.BackTrackerService: @erase # need this one for cheatreco...
+services.PhotonBackTrackerService: @erase
+
+outputs:
+{
+  out1:
+  {
+    module_type: RootOutput
+    fileName:    "quadpts.root"
+  }
+}
+
+physics:
+{
+  producers:
+  {
+    quadpts: @local::standard_quadpts
+  }
+
+  ana: [ quadpts ]
+}
