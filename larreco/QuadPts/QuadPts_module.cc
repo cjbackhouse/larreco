@@ -32,6 +32,7 @@
 #include "Ray.h"
 #include "BPPt.h"
 
+#include "TDecompLU.h"
 #include "TMatrixD.h"
 #include "TVectorD.h"
 
@@ -96,27 +97,46 @@ Ray PointsToRay(const std::array<BPPt, 4>& pts)
   TMatrixD M(4, 4); // my, mz, cy, cz
   TVectorD v(4);
 
+
   for(int i = 0; i < 4; ++i){
     const UnitVec d = pts[i].ray.Dir();
     const MyVec o   = pts[i].ray.Origin();
-    // (mx,my,cz).Cross(d).Dot(o - (cx,cy,cz)) == 0
+    // https://en.wikipedia.org/wiki/Skew_lines#Distance
     //
-    // (mx*d.y - my*d.x)*(o.z-cz) +
+    // (mx,my,mz).Cross(d).Dot(o - (cx,cy,cz)) == 0
+    //
     // (my*d.z - mz*d.y)*(o.x-cx) +
-    // (mz*d.x - mx*d.z)*(o.y-cy) == 0
+    // (mz*d.x - mx*d.z)*(o.y-cy) +
+    // (mx*d.y - my*d.x)*(o.z-cz) == 0
     //
     // we know d.x = 0, and we can set mx = 1 and cx = 0
     //
-    // (d.y)*(o.z-cz) + (my*d.z - mz*d.y)*o.x + (-d.z)*(o.y-cy) == 0
+    // (my*d.z - mz*d.y)*o.x + (-d.z)*(o.y-cy) + (d.y)*(o.z-cz) == 0
 
     M(i, 0) =  d.Z()*o.x; // my coeff
     M(i, 1) = -d.Y()*o.x; // mz coeff
     M(i, 2) =  d.Z();     // cy coeff
     M(i, 3) = -d.Y();     // cz coeff
 
-    v(i) = -d.Y()*o.z + d.Z()*o.y; // const part
+    v(i) = d.Z()*o.y - d.Y()*o.z; // const part
   }
 
+  TDecompLU d(M);
+/*bool ok = */d.Solve(v);
+
+//  std::cout << "OK? " << ok << std::endl;
+
+  const Ray ret(MyVec(0, v[2], v[3]), MyVec(1, v[0], v[1]));
+
+  for(int i = 0; i < 4; ++i){
+    const UnitVec d = pts[i].ray.Dir();
+    const MyVec o   = pts[i].ray.Origin();
+    std::cout << ret.Dir().Cross(d).Dot(o-ret.Origin()) << std::endl;
+  }
+
+  return Ray(MyVec(0, v[2], v[3]), MyVec(1, v[0], v[1]));
+
+/*
   try{
     M.Invert();
   }
@@ -130,6 +150,7 @@ Ray PointsToRay(const std::array<BPPt, 4>& pts)
   const TVectorD x = M*v;
 
   return Ray(MyVec(0, x[2], x[3]), MyVec(1, x[0], x[1]));
+*/
 }
 
 struct MinimalPt
@@ -139,6 +160,19 @@ struct MinimalPt
   float DistSq(const MinimalPt& p) const {return sqr(z-p.z) + sqr(x-p.x);}
 
   float z, x;
+};
+
+struct MinimalLine
+{
+  MinimalLine(MinimalPt a, MinimalPt b)
+    : dzdx((b.z-a.z)/(b.x-a.x)),
+      z0(a.z-dzdx*a.x)
+  {
+  }
+
+  MinimalLine(float _dzdx, float _z0) : dzdx(_dzdx), z0(_z0) {}
+
+  float dzdx, z0;
 };
 
 class VPLeaf
@@ -167,7 +201,10 @@ public:
 
     while(begin != end){
       MinimalPt origin = *begin;
-      auto half = std::partition(begin, end, [origin, kRadius](const MinimalPt& p){return p.DistSq(origin) < sqr(kRadius);});
+      auto half = begin;
+      // HACK HACK HACK
+      for(int i = 0; i < 10; ++i) if(half != end) ++half;
+      //      auto half = std::partition(begin, end, [origin, kRadius](const MinimalPt& p){return p.DistSq(origin) < sqr(kRadius);});
       kids.emplace_back(origin, kRadius, begin, half);
       begin = half;
     }
@@ -200,6 +237,125 @@ public:
 
   VPTree vptree;
 };
+
+
+
+
+
+
+
+// ---------------------------------------------------------------------------
+int CountClosePoints(const View& view, const MinimalLine& line) throw()
+{
+  int ret = 0;
+
+  // Inititialize a lot of constants we can hoist out of the loop
+  //  const UnitVec bd = line.Dir().Cross(view.dir);
+
+  //  MyVec n2 = view.dir.Cross(bd);
+  //  n2 *= 1./line.Dir().Dot(n2);
+
+  //  // dz/dx
+  //  const float m = line.Dir().Dot(view.perp) / line.Dir().X();
+
+  // z(x=0)
+  //  const float c = line.Origin().Dot(view.perp) - line.Origin().x / line.Dir().X() * line.Dir().Dot(view.perp);
+
+  const float angleFactor = sqrt(1+sqr(line.dzdx));
+  const float maxdz = maxd * angleFactor;
+
+  //  const float lambda0 = line.Origin().Dot(n2);
+
+  //  const float lambdax = n2.x;
+  //  const float lambdaz = view.perp.Y()*n2.y + view.perp.Z()*n2.z;
+
+  // This is all extremely hot and worth closely optimizing
+  for(const VPLeaf& leaf: view.vptree.kids){
+    const float dzo = fabs(line.dzdx*leaf.origin.x + line.z0 - leaf.origin.z);
+
+    // If the line misses the circle plus maxd padding then we can dismiss
+    // all the children.
+    if(dzo > (leaf.radius+maxd) * angleFactor) continue;
+
+    for(const MinimalPt& p: leaf.pts){
+      // Surprisingly fabs() here is substantially faster than sqr()
+      const float dz = fabs(line.dzdx*p.x + line.z0 - p.z);
+      if(dz < maxdz){
+        ++ret;
+        //        const float lambda = p.x * lambdax + p.z * lambdaz - lambda0;
+        //        Ls.emplace_back(lambda, v);
+      }
+    } // end for p
+  } // end for leaf
+
+  return ret;
+}
+
+
+// ---------------------------------------------------------------------------
+int CountClosePoints(const View& view, const Ray& line) throw()
+{
+  //  int ret = 0;
+
+  // Inititialize a lot of constants we can hoist out of the loop
+  //  const UnitVec bd = line.Dir().Cross(view.dir);
+
+  //  MyVec n2 = view.dir.Cross(bd);
+  //  n2 *= 1./line.Dir().Dot(n2);
+
+  const MyVec r0 = line.Origin();
+  const MyVec r1 = line.Origin() + 10*line.Dir();
+
+  const double x0 = r0.x;
+  const double x1 = r1.x;
+  const double z0 = r0.Dot(view.perp);
+  const double z1 = r1.Dot(view.perp);
+
+  const double m2 = (z1-z0)/(x1-x0);
+  const double c2 = z0-m2*x0;
+
+  // dz/dx
+  const float m = line.Dir().Dot(view.perp) / line.Dir().X();
+
+  // z(x=0)
+  const float c = line.Origin().Dot(view.perp) - m * line.Origin().x;
+
+  std::cout << "  m1 c1 " << m << " " << c << " " << m2 << " " << c2 << std::endl;
+
+  MinimalLine ml(m, c);
+  return CountClosePoints(view, ml);
+
+  /*
+  const float angleFactor = sqrt(1+sqr(m));
+  const float maxdz = maxd * angleFactor;
+
+  //  const float lambda0 = line.Origin().Dot(n2);
+
+  //  const float lambdax = n2.x;
+  //  const float lambdaz = view.perp.Y()*n2.y + view.perp.Z()*n2.z;
+
+  // This is all extremely hot and worth closely optimizing
+  for(const VPLeaf& leaf: view.vptree.kids){
+    const float dzo = fabs(m*leaf.origin.x + c - leaf.origin.z);
+
+    // If the line misses the circle plus maxd padding then we can dismiss
+    // all the children.
+    if(dzo > (leaf.radius+maxd) * angleFactor) continue;
+
+    for(const MinimalPt& p: leaf.pts){
+      // Surprisingly fabs() here is substantially faster than sqr()
+      const float dz = fabs(m*p.x + c - p.z);
+      if(dz < maxdz){
+        ++ret;
+        //        const float lambda = p.x * lambdax + p.z * lambdaz - lambda0;
+        //        Ls.emplace_back(lambda, v);
+      }
+    } // end for p
+  } // end for leaf
+
+  return ret;
+  */
+}
 
 
 // ---------------------------------------------------------------------------
@@ -624,6 +780,39 @@ void AddArtTrack(const Ray& line,
 }
 
 // ---------------------------------------------------------------------------
+void AddArtTrack2(const Ray& line,
+                  //                 std::vector<BPPt>::iterator begin,
+                  //                 std::vector<BPPt>::iterator end,
+                  //                 MyVec r0, MyVec r1,
+                 std::vector<recob::Track>* trkcol,
+                 art::Assns<recob::Track, recob::Hit>* assns,
+                 const art::Event& evt,
+                 const art::Handle<std::vector<recob::Hit>>& hits)
+{
+  // Magic up a pointer to the track we're about to make
+  const art::ProductID id = evt.getProductID<std::vector<recob::Track>>("");
+  const art::EDProductGetter* pg = evt.productGetter(id);
+  const art::Ptr<recob::Track> ptrk(id, trkcol->size(), pg);
+
+  //  for(auto it = begin; it != end; ++it)
+    //    assns->addSingle(ptrk, art::Ptr<recob::Hit>(hits, it->hitIdx));
+
+  const MyVec r0 = line.Origin() - 10000*line.Dir();
+  const MyVec r1 = line.Origin() + 10000*line.Dir();
+
+  std::vector<geo::Point_t> tps;
+  tps.emplace_back(r0.x, r0.y, r0.z);
+  tps.emplace_back(r1.x, r1.y, r1.z);
+
+  const recob::TrackTrajectory traj(std::move(tps),
+                                    std::vector<geo::Vector_t>(tps.size()), // momenta
+                                    std::vector<recob::TrajectoryPointFlags>(tps.size()),
+                                    false);
+
+  trkcol->emplace_back(traj, 0, 0, 0, recob::Track::SMatrixSym55(), recob::Track::SMatrixSym55(), trkcol->size()+1);
+}
+
+// ---------------------------------------------------------------------------
 void QuadPts::produce(art::Event& evt)
 {
   auto trkcol = std::make_unique<std::vector<recob::Track>>();
@@ -635,6 +824,103 @@ void QuadPts::produce(art::Event& evt)
   std::vector<UnitVec> dirs, perps;
   std::vector<BPPt> pts3d = GetPts3D(*hits, geom, detprop, &dirs, &perps);
 
+  for(int i = 0; i < 3; ++i){
+    std::cout << dirs[i] << " " << perps[i] << std::endl;
+  }
+
+  std::array<std::vector<BPPt>, 3> pts_by_view;
+
+  std::array<std::vector<MinimalPt>, 3> mpts;
+
+  for(const BPPt& pt: pts3d){
+    // TODO ideally GetPts3D would already do this
+    pts_by_view[pt.view].push_back(pt);
+
+    mpts[pt.view].emplace_back(pt.z, pt.ray.Origin().x);
+  }
+
+  const std::array<View, 3> views = {View(mpts[0], dirs[0], perps[0]),
+                                     View(mpts[1], dirs[1], perps[1]),
+                                     View(mpts[2], dirs[2], perps[2])};
+
+
+  // TODO skip any event with a very small view
+
+  //  std::vector<Ray> lines;
+
+  std::vector<BPPt> allBestPts;
+
+  for(int mainView = 0; mainView < 3; ++mainView){
+
+    int bestScore = 0;
+    //    Ray bestLine(MyVec(0, 0, 0), MyVec(0, 0, 0));
+
+    //    const int otherView = (mainView+1)%3;
+    //    const BPPt other_a = pts_by_view[otherView][0];
+    //    const BPPt other_b = pts_by_view[otherView][1];
+
+    const View& view = views[mainView]; // TODO confusing naming
+
+    std::pair<int, int> bestPts;
+
+    const std::vector<MinimalPt>& mptsv = mpts[mainView];
+    const unsigned int N = mptsv.size();
+    for(unsigned int i = 0; i < N; ++i){
+      for(unsigned int j = i+1; j < N; ++j){
+        const MinimalLine line(mptsv[i], mptsv[j]);
+        const int score = CountClosePoints(view, line);
+        if(score > bestScore){
+          bestScore = score;
+          bestPts = std::make_pair(i, j);
+        }
+      }
+    }
+
+    const MinimalLine line(mptsv[bestPts.first], mptsv[bestPts.second]);
+    std::cout << "m c " << line.dzdx << " " << line.z0 << std::endl;
+    std::cout << " -> " << CountClosePoints(view, line) << std::endl;
+
+    allBestPts.push_back(pts_by_view[mainView][bestPts.first]);
+    allBestPts.push_back(pts_by_view[mainView][bestPts.second]);
+
+    /*
+
+    const unsigned int N = main_pts.size();
+    for(unsigned int i = 0; i < N; ++i){
+      for(unsigned int j = i+1; j < N; ++j){
+
+        const Ray line = PointsToRay({main_pts[i], main_pts[j], other_a, other_b});
+        const int score = CountClosePoints(view, line);
+        if(score > bestScore){
+          bestScore = score;
+          bestLine = line;
+        }
+        //        bestScore = std::max(bestScore, score);
+
+        //        lines.push_back(line);
+      } // end for j
+    } // end for i
+    */
+
+    std::cout << "Best score " << bestScore << std::endl;
+    //    std::cout << "  " << CountClosePoints(view, bestLine) << std::endl;
+  } // end for mainView
+
+
+  const Ray bestLine = PointsToRay({allBestPts[0], allBestPts[1], allBestPts[2], allBestPts[3]});
+
+  AddArtTrack2(bestLine,// begin, end, r0, r1,
+               trkcol.get(), assns.get(), evt, hits);
+
+
+  //  std::cout << pts3d.size() << " points -> " << lines.size() << " lines" << std::endl;
+
+  evt.put(std::move(trkcol));
+  evt.put(std::move(assns));
+
+  return;
+
+#if 0
   FastRand r;
 
   std::vector<BPPt>::iterator begin = pts3d.begin();
@@ -763,6 +1049,7 @@ void QuadPts::produce(art::Event& evt)
 
   evt.put(std::move(trkcol));
   evt.put(std::move(assns));
+#endif
 }
 
 } // end namespace quad

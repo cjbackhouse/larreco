@@ -40,4 +40,5 @@ physics:
   }
 
   ana: [ quadpts ]
+  end: [ out1 ]
 }

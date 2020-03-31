@@ -52,8 +52,15 @@ namespace quad
           abort();
         }
         views->push_back(dir);
-        // NB this might not be the same as what the 2D function does
-        perps->emplace_back(MyVec(0, dir.Z(), -dir.Y()));
+
+        // Compute the direction perpendicular to the wires
+        // We want to ultimately have a positive z component in "perp"
+        if(dir.Y() > 0){
+          perps->emplace_back(MyVec(0, -dir.Z(), +dir.Y()));
+        }
+        else{
+          perps->emplace_back(MyVec(0, +dir.Z(), -dir.Y()));
+        }
       }
 
       ret.emplace_back(MyVec(xpos, r0.y, r0.z), dir, view, hitIdx++);
