@@ -196,15 +196,19 @@ public:
   VPTree(std::vector<MinimalPt>::iterator begin,
          std::vector<MinimalPt>::iterator end)
   {
+    // Bigger hack
+    kids.emplace_back(*begin, std::numeric_limits<float>::infinity(), begin, end);
+    return;
+
     // Adjustable parameter. This one gets ~10 pts per leaf
     const float kRadius = 5;
 
     while(begin != end){
       MinimalPt origin = *begin;
-      auto half = begin;
       // HACK HACK HACK
-      for(int i = 0; i < 10; ++i) if(half != end) ++half;
-      //      auto half = std::partition(begin, end, [origin, kRadius](const MinimalPt& p){return p.DistSq(origin) < sqr(kRadius);});
+      //      auto half = begin;
+      //      for(int i = 0; i < 10; ++i) if(half != end) ++half;
+      auto half = std::partition(begin, end, [origin, kRadius](const MinimalPt& p){return p.DistSq(origin) < sqr(kRadius);});
       kids.emplace_back(origin, kRadius, begin, half);
       begin = half;
     }
@@ -217,6 +221,195 @@ public:
   }
 
   std::vector<VPLeaf> kids;
+};
+
+class TreeLayer
+{
+public:
+  std::bitset<16> kids;
+};
+
+class VPTree2
+{
+public:
+  VPTree2(const std::vector<MinimalPt>& pts)
+  {
+    fLayers[std::make_tuple(0, 0, 0)] = TreeLayer(); // top level
+
+    zoff = std::numeric_limits<float>::infinity();
+    xoff = std::numeric_limits<float>::infinity();
+
+    for(MinimalPt pt: pts){
+      zoff = std::min(zoff, pt.z);
+      xoff = std::min(xoff, pt.x);
+    }
+
+    xoff -= .5;
+    zoff -= .5;
+
+    zoff *= -1;
+    xoff *= -1;
+
+    for(MinimalPt pt: pts) Add(pt);
+  }
+
+  void Add(MinimalPt pt)
+  {
+    pt.z += zoff;
+    pt.x += xoff;
+
+    int stride = 1;
+    const float cellSize = 1; // cm
+
+    // True global position
+    const int i = int(pt.x/cellSize);
+    const int j = int(pt.z/cellSize);
+    fPts[std::make_pair(i, j)].push_back(pt);
+
+    for(int level = 9; level >= 0; --level){
+      fSets[level].emplace(i/stride, j/stride);
+      stride *= 2;
+    }
+
+    return;
+    /*
+    std::cout << pt.x << " " << pt.z << " -> " << i << " " << j << std::endl;
+
+    TreeLayer* layer = &fLayers[std::make_tuple(0, 0, 0)];
+    for(int level = 0; level < 10; ++level){
+      const int i0 = (i/stride)*stride;
+      const int j0 = (j/stride)*stride;
+
+      const int di = i-i0;
+      const int dj = j-j0;
+
+      std::cout << " = " << i0 << "+" << di << ", " << j0 << "+" << dj << std::endl;
+
+      const auto global_key = std::make_tuple(level, i0, j0);
+
+      if(layer->kids[dj*4+di]){
+        layer = &fLayers[global_key];
+      }
+      else{
+        layer->kids[dj*4+di] = 1;
+        if(level != 9){
+          fLayers[global_key] = TreeLayer();
+          layer = &fLayers[global_key];
+        }
+      }
+
+      stride /= 2;
+    } // end for level
+
+    abort();
+    */
+  }
+
+  int Count(MinimalLine line) const
+  {
+    line.z0 += zoff - xoff*line.dzdx; // correct for point offset
+
+    int stride = 512; // TODO 2^9
+    const float cellSize = 1; // cm
+
+    const float angleFactor = sqrt(1+sqr(line.dzdx));
+    const float maxdz = maxd * angleFactor;
+
+    std::vector<std::pair<int, int>> todo, next;
+    todo.emplace_back(0, 0);
+
+    for(int level = 0; level < 9/*10*/; ++level){
+      const float Rz = stride*cellSize/sqrt(2) * angleFactor; // cover the corners
+
+      for(std::pair<int, int> c: todo){
+        const float x0 = (c.first+.5)*stride*cellSize;
+        const float z0 = (c.second+.5)*stride*cellSize;
+
+        const float dz = fabs(line.dzdx * x0 + line.z0 - z0);
+        //        std::cout << d << " " << R << std::endl;
+        if(dz < Rz + maxdz){
+          for(int di = 0; di <= 1; ++di){
+            for(int dj = 0; dj <= 1; ++dj){
+              const auto key = std::make_pair(c.first*2+di, c.second*2+dj);
+              if(fSets[level+1].count(key)) next.push_back(key);
+            } // end for dj
+          } // end for di
+        } // end if
+      } // end for c (todo)
+
+      //      std::cout << "Level " << level << " todo " << todo.size() << " next " << next.size() << std::endl;
+
+      todo.swap(next);
+      //      std::swap(todo, next);
+      next.clear();
+
+      stride /= 2;
+    } // end for level
+
+    int ret = 0;
+    for(std::pair<int, int> c: todo){
+      for(MinimalPt p: fPts.find(c)->second){
+        const float dz = fabs(line.dzdx * p.x + line.z0 - p.z);
+        if(dz < maxdz) ++ret;
+      }
+    }
+
+    // TODO actually inspect the points
+    return ret;
+    //    const int stride = 1024; // TODO
+
+    //    return Count(line, 0, 0, 0, stride);
+  }
+
+protected:
+  int Count(MinimalLine line,
+            int level, int i0, int j0,
+            int stride) const
+  {
+    const double cellSize = 1; // cm
+
+    const double R = stride*cellSize/sqrt(2); // cover the corners
+
+    const double mfactor = 1/sqrt(1+sqr(line.dzdx)); // TODO hoist?
+
+    // We know this exists because the caller checked the kids mask
+    const TreeLayer layer = fLayers.find(std::make_tuple(level, i0, j0))->second;
+
+    int ret = 0;
+
+    for(int i = 0; i < 4; ++i){ // TODO loop to 16?
+      for(int j = 0; j < 4; ++j){
+        if(!layer.kids[j*4+i]) continue;
+
+        const double z = (i0+(i+.5)*stride)*cellSize;
+        const double x = (j0+(j+.5)*stride)*cellSize;
+
+        const double d = fabs(line.dzdx * x + line.z0 - z)*mfactor;
+
+        if(d < R){ // line hits the circle - TODO padding
+          if(level == 10){
+            // TODO check them individually
+            ret += fPts.find(std::make_pair(i0*i*stride, j0+j*stride))->second.size();
+          }
+          else{
+            // Recurse
+            ret += Count(line, level+1, i0+i*stride, j0*j+stride, stride/2);
+          }
+        }
+      }
+    }
+
+    return ret;
+  }
+
+  float zoff, xoff;
+
+  std::array<std::set<std::pair<int, int>>, 10> fSets;
+
+  std::map<std::tuple<int, int, int>, TreeLayer> fLayers;
+
+  // Final layer
+  std::map<std::pair<int, int>, std::vector<MinimalPt>> fPts;
 };
 
 class View
@@ -280,6 +473,10 @@ int CountClosePoints(const View& view, const MinimalLine& line) throw()
     for(const MinimalPt& p: leaf.pts){
       // Surprisingly fabs() here is substantially faster than sqr()
       const float dz = fabs(line.dzdx*p.x + line.z0 - p.z);
+
+      // Hmm, seems not really
+      //      const float dz2 = sqr(line.dzdx*p.x + line.z0 - p.z);
+
       if(dz < maxdz){
         ++ret;
         //        const float lambda = p.x * lambdax + p.z * lambdaz - lambda0;
@@ -852,6 +1049,8 @@ void QuadPts::produce(art::Event& evt)
 
   for(int mainView = 0; mainView < 3; ++mainView){
 
+    VPTree2 vp2(mpts[mainView]);
+
     int bestScore = 0;
     //    Ray bestLine(MyVec(0, 0, 0), MyVec(0, 0, 0));
 
@@ -868,7 +1067,14 @@ void QuadPts::produce(art::Event& evt)
     for(unsigned int i = 0; i < N; ++i){
       for(unsigned int j = i+1; j < N; ++j){
         const MinimalLine line(mptsv[i], mptsv[j]);
+
         const int score = CountClosePoints(view, line);
+        const int score2 = vp2.Count(line);
+        if(score != score2){
+          std::cout << score << " != " << score2 << std::endl;
+          //          abort();
+        }
+
         if(score > bestScore){
           bestScore = score;
           bestPts = std::make_pair(i, j);
@@ -879,6 +1085,9 @@ void QuadPts::produce(art::Event& evt)
     const MinimalLine line(mptsv[bestPts.first], mptsv[bestPts.second]);
     std::cout << "m c " << line.dzdx << " " << line.z0 << std::endl;
     std::cout << " -> " << CountClosePoints(view, line) << std::endl;
+
+    std::cout << "vp: " << vp2.Count(line) << std::endl;
+
 
     allBestPts.push_back(pts_by_view[mainView][bestPts.first]);
     allBestPts.push_back(pts_by_view[mainView][bestPts.second]);
@@ -911,7 +1120,6 @@ void QuadPts::produce(art::Event& evt)
 
   AddArtTrack2(bestLine,// begin, end, r0, r1,
                trkcol.get(), assns.get(), evt, hits);
-
 
   //  std::cout << pts3d.size() << " points -> " << lines.size() << " lines" << std::endl;
 
