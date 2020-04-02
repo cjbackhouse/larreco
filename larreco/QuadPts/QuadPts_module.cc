@@ -223,10 +223,10 @@ public:
   std::vector<VPLeaf> kids;
 };
 
-class VPTree2
+class QuadTree
 {
 public:
-  VPTree2(const std::vector<MinimalPt>& pts)
+  QuadTree(const std::vector<MinimalPt>& pts)
   {
     zoff = std::numeric_limits<float>::infinity();
     xoff = std::numeric_limits<float>::infinity();
@@ -245,7 +245,7 @@ public:
     for(MinimalPt pt: pts) Add(pt);
   }
 
-  int Count(MinimalLine line) const
+  int Count(MinimalLine line) const throw()
   {
     line.z0 += zoff - xoff*line.dzdx; // correct for point offset
 
@@ -255,27 +255,43 @@ public:
     const float angleFactor = sqrt(1+sqr(line.dzdx));
     const float maxdz = maxd * angleFactor;
 
-    std::vector<int> todo, next;
+    static std::vector<int> todo, next;
+    //    todo.reserve(1024*1024);
+    //    next.reserve(1024*1024);
+    todo.clear();
+    next.clear();
     todo.push_back(0);
 
     for(int level = 0; level < 9/*10*/; ++level){
-      const float Rz = stride*cellSize/sqrt(2) * angleFactor; // cover the corners
+      //      const float Rz = stride*cellSize/sqrt(2) * angleFactor; // cover the corners
 
       for(int k: todo){
-        const float x0 = (k/1024+.5)*stride*cellSize;
-        const float z0 = (k%1024+.5)*stride*cellSize;
+        //        const float x0 = (k/1024+.5)*stride*cellSize;
+        //        const float z0 = (k%1024+.5)*stride*cellSize;
 
-        const float dz = fabs(line.dzdx * x0 + line.z0 - z0);
+        //        const float dz = fabs(line.dzdx * x0 + line.z0 - z0);
 
-        if(dz < Rz + maxdz){
-          for(int di = 0; di <= 1; ++di){
-            for(int dj = 0; dj <= 1; ++dj){
-              const int key = 1024*((k/1024)*2+di)+ ((k%1024)*2+dj);
-              if(fSets[level+1].count(key)) next.push_back(key);
-            } // end for dj
-          } // end for di
+        const float xlo = (k/1024  )*stride*cellSize - maxd;
+        const float xhi = (k/1024+1)*stride*cellSize + maxd;
+        const float zlo = (k%1024  )*stride*cellSize - maxd;
+        const float zhi = (k%1024+1)*stride*cellSize + maxd;
+        const float zin  = line.dzdx*xlo + line.z0;
+        const float zout = line.dzdx*xhi + line.z0;
+
+        // Intersects the (padded) box
+        if((zin > zlo || zout > zlo) && (zin < zhi || zout < zhi)){
+
+          //        if(dz < Rz + maxdz){
+          for(int dij = 0; dij < 4; ++dij){
+            const int di = dij/2;
+            const int dj = dij%2;
+            //          for(int di = 0; di <= 1; ++di){
+            //            for(int dj = 0; dj <= 1; ++dj){
+            const int key = 1024*((k/1024)*2+di) + ((k%1024)*2+dj);
+            if(fSets[level+1][key]/*.count(key)*/) next.push_back(key);
+          } // end for dij
         } // end if
-      } // end for c (todo)
+      } // end for k (todo)
 
       todo.swap(next);
       next.clear();
@@ -283,9 +299,24 @@ public:
       stride /= 2;
     } // end for level
 
+    /*
+    // Putting all the math together like this is a little faster
+    static std::vector<MinimalPt> pts;
+    pts.clear();
+    for(int k: todo){
+      const auto& fpk = fPts[k];
+      pts.insert(pts.end(), fpk.begin(), fpk.end());
+    }
+
+    int ret = 0;
+    for(MinimalPt p: pts){
+      if(fabs(line.dzdx * p.x + line.z0 - p.z) < maxdz) ++ret;
+    }
+    */
+
     int ret = 0;
     for(int k: todo){
-      for(MinimalPt p: fPts.find(k)->second){
+      for(MinimalPt p: fPts[k]){//fPts.find(k)->second){
         const float dz = fabs(line.dzdx * p.x + line.z0 - p.z);
         if(dz < maxdz) ++ret;
       }
@@ -310,16 +341,20 @@ protected:
 
     for(int level = 9; level >= 0; --level){
       const int key = 1024*(i/stride) + j/stride;
-      fSets[level].insert(key);
+      fSets[level][key] = true;//.insert(key);
       stride *= 2;
     }
   }
 
   float zoff, xoff;
 
-  std::array<std::unordered_set<int>, 10> fSets;
+  //  std::array<std::array<bool, 1024*1024>, 10> fSets;
+  std::array<std::bitset<1024*1024>, 10> fSets;
+  //  std::array<std::unordered_set<int>, 10> fSets;
 
-  std::unordered_map<int, std::vector<MinimalPt>> fPts;
+  //  std::unordered_map<int, std::vector<MinimalPt>> fPts;
+
+  std::array<std::vector<MinimalPt>, 1024*1024> fPts;
 };
 
 class View
@@ -328,12 +363,14 @@ public:
   View(std::vector<MinimalPt>& _pts,
        const UnitVec& _dir,
        const UnitVec& _perp) :
+    pts(_pts),
     npts(_pts.size()),
     dir(_dir), perp(_perp),
     vptree(_pts.begin(), _pts.end())
   {
   }
 
+  std::vector<MinimalPt> pts;
   unsigned int npts;
 
   UnitVec dir, perp;
@@ -348,52 +385,22 @@ public:
 
 
 // ---------------------------------------------------------------------------
-int CountClosePoints(const View& view, const MinimalLine& line) throw()
+int CountClosePoints(const std::vector<MinimalPt>& pts, const MinimalLine& line) throw()
 {
   int ret = 0;
-
-  // Inititialize a lot of constants we can hoist out of the loop
-  //  const UnitVec bd = line.Dir().Cross(view.dir);
-
-  //  MyVec n2 = view.dir.Cross(bd);
-  //  n2 *= 1./line.Dir().Dot(n2);
-
-  //  // dz/dx
-  //  const float m = line.Dir().Dot(view.perp) / line.Dir().X();
-
-  // z(x=0)
-  //  const float c = line.Origin().Dot(view.perp) - line.Origin().x / line.Dir().X() * line.Dir().Dot(view.perp);
 
   const float angleFactor = sqrt(1+sqr(line.dzdx));
   const float maxdz = maxd * angleFactor;
 
-  //  const float lambda0 = line.Origin().Dot(n2);
+  for(const MinimalPt& p: pts){
+    // Surprisingly fabs() here is substantially faster than sqr()
+    const float dz = fabs(line.dzdx*p.x + line.z0 - p.z);
 
-  //  const float lambdax = n2.x;
-  //  const float lambdaz = view.perp.Y()*n2.y + view.perp.Z()*n2.z;
+    // Hmm, seems not really
+    //      const float dz2 = sqr(line.dzdx*p.x + line.z0 - p.z);
 
-  // This is all extremely hot and worth closely optimizing
-  for(const VPLeaf& leaf: view.vptree.kids){
-    const float dzo = fabs(line.dzdx*leaf.origin.x + line.z0 - leaf.origin.z);
-
-    // If the line misses the circle plus maxd padding then we can dismiss
-    // all the children.
-    if(dzo > (leaf.radius+maxd) * angleFactor) continue;
-
-    for(const MinimalPt& p: leaf.pts){
-      // Surprisingly fabs() here is substantially faster than sqr()
-      const float dz = fabs(line.dzdx*p.x + line.z0 - p.z);
-
-      // Hmm, seems not really
-      //      const float dz2 = sqr(line.dzdx*p.x + line.z0 - p.z);
-
-      if(dz < maxdz){
-        ++ret;
-        //        const float lambda = p.x * lambdax + p.z * lambdaz - lambda0;
-        //        Ls.emplace_back(lambda, v);
-      }
-    } // end for p
-  } // end for leaf
+    if(dz < maxdz) ++ret;
+  } // end for p
 
   return ret;
 }
@@ -430,7 +437,7 @@ int CountClosePoints(const View& view, const Ray& line) throw()
   std::cout << "  m1 c1 " << m << " " << c << " " << m2 << " " << c2 << std::endl;
 
   MinimalLine ml(m, c);
-  return CountClosePoints(view, ml);
+  return CountClosePoints(view.pts, ml);
 
   /*
   const float angleFactor = sqrt(1+sqr(m));
@@ -959,7 +966,7 @@ void QuadPts::produce(art::Event& evt)
 
   for(int mainView = 0; mainView < 3; ++mainView){
 
-    VPTree2 vp2(mpts[mainView]);
+    QuadTree* vp2 = new QuadTree(mpts[mainView]);
 
     int bestScore = 0;
     //    Ray bestLine(MyVec(0, 0, 0), MyVec(0, 0, 0));
@@ -968,7 +975,7 @@ void QuadPts::produce(art::Event& evt)
     //    const BPPt other_a = pts_by_view[otherView][0];
     //    const BPPt other_b = pts_by_view[otherView][1];
 
-    const View& view = views[mainView]; // TODO confusing naming
+    //    const View& view = views[mainView]; // TODO confusing naming
 
     std::pair<int, int> bestPts;
 
@@ -978,9 +985,9 @@ void QuadPts::produce(art::Event& evt)
       for(unsigned int j = i+1; j < N; ++j){
         const MinimalLine line(mptsv[i], mptsv[j]);
 
-        const int score = CountClosePoints(view, line);
-        const int score2 = vp2.Count(line);
-        if(score != score2){
+        const int score = CountClosePoints(mptsv, line);
+        const int score2 = vp2->Count(line);
+        if(abs(score-score2) > 5){
           std::cout << score << " != " << score2 << std::endl;
           //          abort();
         }
@@ -994,9 +1001,9 @@ void QuadPts::produce(art::Event& evt)
 
     const MinimalLine line(mptsv[bestPts.first], mptsv[bestPts.second]);
     std::cout << "m c " << line.dzdx << " " << line.z0 << std::endl;
-    std::cout << " -> " << CountClosePoints(view, line) << std::endl;
+    std::cout << " -> " << CountClosePoints(mptsv, line) << std::endl;
 
-    std::cout << "vp: " << vp2.Count(line) << std::endl;
+    std::cout << "vp: " << vp2->Count(line) << std::endl;
 
 
     allBestPts.push_back(pts_by_view[mainView][bestPts.first]);
