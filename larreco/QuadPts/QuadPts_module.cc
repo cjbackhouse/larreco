@@ -22,6 +22,7 @@
 
 // LArSoft libraries
 #include "lardataobj/RecoBase/Hit.h"
+#include "lardataobj/RecoBase/SpacePoint.h"
 #include "lardataobj/RecoBase/Track.h"
 #include "lardataobj/RecoBase/Vertex.h"
 #include "lardata/DetectorInfoServices/DetectorPropertiesService.h"
@@ -77,6 +78,8 @@ QuadPts::QuadPts(const fhicl::ParameterSet& pset) :
 {
   produces<std::vector<recob::Track>>();
   produces<art::Assns<recob::Track, recob::Hit>>();
+
+  produces<std::vector<recob::SpacePoint>>();
 }
 
 // ---------------------------------------------------------------------------
@@ -121,11 +124,19 @@ Ray PointsToRay(const std::array<BPPt, 4>& pts)
     v(i) = d.Z()*o.y - d.Y()*o.z; // const part
   }
 
-  TDecompLU d(M);
-/*bool ok = */d.Solve(v);
+  try{
+    TDecompLU d(M);
+    /*bool ok = */d.Solve(v);
+  }
+  catch(...){
+    std::cout << "Singular matrix in QuadPts::PointsToRay" << std::endl;
+    //    M.Print();
+    // garbage return is OK, will just score badly
+  }
 
 //  std::cout << "OK? " << ok << std::endl;
 
+/*
   const Ray ret(MyVec(0, v[2], v[3]), MyVec(1, v[0], v[1]));
 
   for(int i = 0; i < 4; ++i){
@@ -133,6 +144,7 @@ Ray PointsToRay(const std::array<BPPt, 4>& pts)
     const MyVec o   = pts[i].ray.Origin();
     std::cout << ret.Dir().Cross(d).Dot(o-ret.Origin()) << std::endl;
   }
+*/
 
   return Ray(MyVec(0, v[2], v[3]), MyVec(1, v[0], v[1]));
 
@@ -151,6 +163,11 @@ Ray PointsToRay(const std::array<BPPt, 4>& pts)
 
   return Ray(MyVec(0, x[2], x[3]), MyVec(1, x[0], x[1]));
 */
+}
+
+Ray PointsToRay(BPPt a, BPPt b, BPPt c, BPPt d)
+{
+  return PointsToRay({a, b, c, d});
 }
 
 struct MinimalPt
@@ -226,6 +243,8 @@ public:
 class QuadTree
 {
 public:
+  const float cellSize = 64;//1; // cm
+
   QuadTree(const std::vector<MinimalPt>& pts)
   {
     zoff = std::numeric_limits<float>::infinity();
@@ -250,7 +269,6 @@ public:
     line.z0 += zoff - xoff*line.dzdx; // correct for point offset
 
     int stride = 512; // TODO 2^9
-    const float cellSize = 1; // cm
 
     const float angleFactor = sqrt(1+sqr(line.dzdx));
     const float maxdz = maxd * angleFactor;
@@ -332,7 +350,6 @@ protected:
     pt.x += xoff;
 
     int stride = 1;
-    const float cellSize = 1; // cm
 
     // True global position
     const int i = int(pt.x/cellSize);
@@ -407,6 +424,28 @@ int CountClosePoints(const std::vector<MinimalPt>& pts, const MinimalLine& line)
 
 
 // ---------------------------------------------------------------------------
+int CountClosePointsBulk(const std::vector<MinimalPt>& pts,
+                         const std::vector<MinimalLine>& lines) throw()
+{
+  int ret = 0;
+
+  for(const MinimalLine& line: lines){
+    const float angleFactor = 1+sqr(line.dzdx);
+    const float maxdzsq = maxdsq * angleFactor;
+
+    int score = 0;
+    for(const MinimalPt& p: pts){
+      const float dzsq = sqr(line.dzdx*p.x + line.z0 - p.z);
+      if(dzsq < maxdzsq) ++score;
+    } // end for p
+    ret = std::max(ret, score);
+  }
+
+  return ret;
+}
+
+
+// ---------------------------------------------------------------------------
 int CountClosePoints(const View& view, const Ray& line) throw()
 {
   //  int ret = 0;
@@ -417,6 +456,7 @@ int CountClosePoints(const View& view, const Ray& line) throw()
   //  MyVec n2 = view.dir.Cross(bd);
   //  n2 *= 1./line.Dir().Dot(n2);
 
+  /*
   const MyVec r0 = line.Origin();
   const MyVec r1 = line.Origin() + 10*line.Dir();
 
@@ -427,6 +467,7 @@ int CountClosePoints(const View& view, const Ray& line) throw()
 
   const double m2 = (z1-z0)/(x1-x0);
   const double c2 = z0-m2*x0;
+  */
 
   // dz/dx
   const float m = line.Dir().Dot(view.perp) / line.Dir().X();
@@ -434,7 +475,7 @@ int CountClosePoints(const View& view, const Ray& line) throw()
   // z(x=0)
   const float c = line.Origin().Dot(view.perp) - m * line.Origin().x;
 
-  std::cout << "  m1 c1 " << m << " " << c << " " << m2 << " " << c2 << std::endl;
+  //  std::cout << "  m1 c1 " << m << " " << c << " " << m2 << " " << c2 << std::endl;
 
   MinimalLine ml(m, c);
   return CountClosePoints(view.pts, ml);
@@ -897,11 +938,11 @@ void AddArtTrack(const Ray& line,
 void AddArtTrack2(const Ray& line,
                   //                 std::vector<BPPt>::iterator begin,
                   //                 std::vector<BPPt>::iterator end,
-                  //                 MyVec r0, MyVec r1,
-                 std::vector<recob::Track>* trkcol,
-                 art::Assns<recob::Track, recob::Hit>* assns,
-                 const art::Event& evt,
-                 const art::Handle<std::vector<recob::Hit>>& hits)
+                  double lambda0, double lambda1,
+                  std::vector<recob::Track>* trkcol,
+                  art::Assns<recob::Track, recob::Hit>* assns,
+                  const art::Event& evt,
+                  const art::Handle<std::vector<recob::Hit>>& hits)
 {
   // Magic up a pointer to the track we're about to make
   const art::ProductID id = evt.getProductID<std::vector<recob::Track>>("");
@@ -911,8 +952,8 @@ void AddArtTrack2(const Ray& line,
   //  for(auto it = begin; it != end; ++it)
     //    assns->addSingle(ptrk, art::Ptr<recob::Hit>(hits, it->hitIdx));
 
-  const MyVec r0 = line.Origin() - 10000*line.Dir();
-  const MyVec r1 = line.Origin() + 10000*line.Dir();
+  const MyVec r0 = line.Origin() + lambda0 * line.Dir();
+  const MyVec r1 = line.Origin() + lambda1 * line.Dir();
 
   std::vector<geo::Point_t> tps;
   tps.emplace_back(r0.x, r0.y, r0.z);
@@ -927,10 +968,156 @@ void AddArtTrack2(const Ray& line,
 }
 
 // ---------------------------------------------------------------------------
+void AddSpacePoints(const std::vector<MyVec>& sps,
+                    std::vector<recob::SpacePoint>* spscol)
+{
+  for(MyVec sp: sps){
+    const double xyz[3] = {sp.x, sp.y, sp.z};
+    const double exyz[6] = {0, 0, 0, 0, 0, 0};
+    spscol->emplace_back(xyz, exyz, 0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+struct Result
+{
+  Result(int s, int a, int b) : score(s), hitA(a), hitB(b) {}
+  int score, hitA, hitB;
+
+  bool operator<(const Result& r) const {return score < r.score;}
+};
+
+// ---------------------------------------------------------------------------
+void PopulateResultsTable(const std::array<std::vector<MinimalPt>, 3>& mpts,
+                          std::array<std::vector<Result>, 3>& results)
+{
+  for(int view = 0; view < 3; ++view){
+    const std::vector<MinimalPt>& mptsv = mpts[view];
+    const unsigned int N = mptsv.size();
+    std::vector<Result>& local_results = results[view];
+    local_results.reserve((N*(N+1))/2);
+
+    for(unsigned int i = 0; i < N; ++i){
+      for(unsigned int j = i+1; j < N; ++j){
+        const MinimalLine line(mptsv[i], mptsv[j]);
+        const int score = CountClosePoints(mptsv, line);
+
+        local_results.emplace_back(score, i, j);
+      }
+    }
+  }
+
+  //    std::sort(local_results.rbegin(), local_results.rend());
+}
+
+// ---------------------------------------------------------------------------
+// NB mutates results
+Ray BestRay(std::array<std::vector<Result>, 3>& results,
+            const std::array<View, 3>& views,
+            const std::array<std::vector<BPPt>, 3>& pts_by_view)
+{
+  int bestMinScore = 0;
+  int bestTotScore = 0;
+  Ray bestRay(MyVec(0, 0, 0), MyVec(0, 0, 0));
+
+  FastRand r;
+
+  // All the ways to have 2 views (order doesn't matter) and then the third (special) view
+  const int viewIdxs[3][3] = {{0, 1, 2}, {0, 2, 1}, {1, 2, 0}};
+
+  int nNoProg = 0;
+
+  while(nNoProg < 1e6){
+    for(int vi = 0; vi < 3; ++vi){
+      const int viewA = viewIdxs[vi][0];
+      const int viewB = viewIdxs[vi][1];
+      const int viewC = viewIdxs[vi][2];
+
+      const std::vector<BPPt>& ptsA = pts_by_view[viewA];
+      const std::vector<BPPt>& ptsB = pts_by_view[viewB];
+
+      const Result resA = results[viewA][r.xorshift32()%results[viewA].size()];
+      const Result resB = results[viewB][r.xorshift32()%results[viewB].size()];
+
+      const Ray ray = PointsToRay(ptsA[resA.hitA], ptsA[resA.hitB],
+                                  ptsB[resB.hitA], ptsB[resB.hitB]);
+
+      const int scoreC = CountClosePoints(views[viewC], ray);
+      const int totScore = resA.score + resB.score + scoreC;
+      const int minScore = std::min(std::min(resA.score, resB.score), scoreC);
+
+      if(minScore > bestMinScore ||
+         (minScore == bestMinScore && totScore > bestTotScore)){
+        std::cout << "*** new best score " << minScore << std::endl;
+        std::cout << "  " << resA.score << " + " << resB.score << " + " << scoreC << std::endl;
+        bestMinScore = minScore;
+        bestTotScore = totScore;
+        bestRay = ray;
+        nNoProg = 0;
+
+        // TODO figure out how to do this with lower_bound et al
+        for(int view = 0; view < 3; ++view){
+          while(!results[view].empty() && results[view].back().score < bestMinScore) results[view].pop_back();
+        }
+
+        std::cout << " now " << results[viewA].size() << " " << results[viewB].size() << " " << results[viewC].size() << std::endl;
+        // TODO potentially exhaustive search once the product of the two smallest is minimized
+      }
+      else{
+        ++nNoProg;
+      }
+    }
+  }
+
+  return bestRay;
+}
+
+// ---------------------------------------------------------------------------
+  std::vector<MyVec> ProjectPoints(const Ray& ray, std::vector<BPPt>& pts,
+                                   double& lambda0, double& lambda1)
+{
+  std::vector<MyVec> ret;
+
+  lambda0 = +std::numeric_limits<double>::infinity();
+  lambda1 = -std::numeric_limits<double>::infinity();
+
+  std::vector<BPPt> rejects;
+  rejects.reserve(pts.size());
+
+  for(const BPPt& pt: pts){
+    // https://en.wikipedia.org/wiki/Skew_lines#Distance
+    const UnitVec n = ray.Dir().Cross(pt.ray.Dir());
+    const MyVec dos = ray.Origin()-pt.ray.Origin();
+    const double d = fabs(n.Dot(dos));
+
+    if(d < maxd){
+      const MyVec n2 = ray.Dir().Cross(n);
+      const double lambda_pt = dos.Dot(n2) / pt.ray.Dir().Dot(n2);
+      const MyVec closest = pt.ray.Origin() + lambda_pt * pt.ray.Dir();
+      ret.push_back(closest);
+
+      const MyVec n1 = pt.ray.Dir().Cross(n);
+      const double lambda_trk = -dos.Dot(n1) / ray.Dir().Dot(n1);
+      lambda0 = std::min(lambda0, lambda_trk);
+      lambda1 = std::max(lambda1, lambda_trk);
+    }
+    else{
+      rejects.push_back(pt);
+    }
+  }
+
+  pts.swap(rejects);
+
+  return ret;
+}
+
+// ---------------------------------------------------------------------------
 void QuadPts::produce(art::Event& evt)
 {
   auto trkcol = std::make_unique<std::vector<recob::Track>>();
   auto assns = std::make_unique<art::Assns<recob::Track, recob::Hit>>();
+
+  auto spscol = std::make_unique<std::vector<recob::SpacePoint>>();
 
   art::Handle<std::vector<recob::Hit>> hits;
   evt.getByLabel(fHitLabel, hits);
@@ -942,239 +1129,41 @@ void QuadPts::produce(art::Event& evt)
     std::cout << dirs[i] << " " << perps[i] << std::endl;
   }
 
-  std::array<std::vector<BPPt>, 3> pts_by_view;
+  for(int itrk = 0; itrk < 3; ++itrk){
+    std::array<std::vector<BPPt>, 3> pts_by_view;
 
-  std::array<std::vector<MinimalPt>, 3> mpts;
+    std::array<std::vector<MinimalPt>, 3> mpts;
 
-  for(const BPPt& pt: pts3d){
-    // TODO ideally GetPts3D would already do this
-    pts_by_view[pt.view].push_back(pt);
-
-    mpts[pt.view].emplace_back(pt.z, pt.ray.Origin().x);
-  }
-
-  const std::array<View, 3> views = {View(mpts[0], dirs[0], perps[0]),
-                                     View(mpts[1], dirs[1], perps[1]),
-                                     View(mpts[2], dirs[2], perps[2])};
-
-
-  // TODO skip any event with a very small view
-
-  //  std::vector<Ray> lines;
-
-  std::vector<BPPt> allBestPts;
-
-  for(int mainView = 0; mainView < 3; ++mainView){
-
-    QuadTree* vp2 = new QuadTree(mpts[mainView]);
-
-    int bestScore = 0;
-    //    Ray bestLine(MyVec(0, 0, 0), MyVec(0, 0, 0));
-
-    //    const int otherView = (mainView+1)%3;
-    //    const BPPt other_a = pts_by_view[otherView][0];
-    //    const BPPt other_b = pts_by_view[otherView][1];
-
-    //    const View& view = views[mainView]; // TODO confusing naming
-
-    std::pair<int, int> bestPts;
-
-    const std::vector<MinimalPt>& mptsv = mpts[mainView];
-    const unsigned int N = mptsv.size();
-    for(unsigned int i = 0; i < N; ++i){
-      for(unsigned int j = i+1; j < N; ++j){
-        const MinimalLine line(mptsv[i], mptsv[j]);
-
-        const int score = CountClosePoints(mptsv, line);
-        const int score2 = vp2->Count(line);
-        if(abs(score-score2) > 5){
-          std::cout << score << " != " << score2 << std::endl;
-          //          abort();
-        }
-
-        if(score > bestScore){
-          bestScore = score;
-          bestPts = std::make_pair(i, j);
-        }
-      }
+    for(const BPPt& pt: pts3d){
+      // TODO ideally GetPts3D would already do this
+      pts_by_view[pt.view].push_back(pt);
+      mpts[pt.view].emplace_back(pt.z, pt.ray.Origin().x);
     }
-
-    const MinimalLine line(mptsv[bestPts.first], mptsv[bestPts.second]);
-    std::cout << "m c " << line.dzdx << " " << line.z0 << std::endl;
-    std::cout << " -> " << CountClosePoints(mptsv, line) << std::endl;
-
-    std::cout << "vp: " << vp2->Count(line) << std::endl;
-
-
-    allBestPts.push_back(pts_by_view[mainView][bestPts.first]);
-    allBestPts.push_back(pts_by_view[mainView][bestPts.second]);
-
-    /*
-
-    const unsigned int N = main_pts.size();
-    for(unsigned int i = 0; i < N; ++i){
-      for(unsigned int j = i+1; j < N; ++j){
-
-        const Ray line = PointsToRay({main_pts[i], main_pts[j], other_a, other_b});
-        const int score = CountClosePoints(view, line);
-        if(score > bestScore){
-          bestScore = score;
-          bestLine = line;
-        }
-        //        bestScore = std::max(bestScore, score);
-
-        //        lines.push_back(line);
-      } // end for j
-    } // end for i
-    */
-
-    std::cout << "Best score " << bestScore << std::endl;
-    //    std::cout << "  " << CountClosePoints(view, bestLine) << std::endl;
-  } // end for mainView
-
-
-  const Ray bestLine = PointsToRay({allBestPts[0], allBestPts[1], allBestPts[2], allBestPts[3]});
-
-  AddArtTrack2(bestLine,// begin, end, r0, r1,
-               trkcol.get(), assns.get(), evt, hits);
-
-  //  std::cout << pts3d.size() << " points -> " << lines.size() << " lines" << std::endl;
-
-  evt.put(std::move(trkcol));
-  evt.put(std::move(assns));
-
-  return;
-
-#if 0
-  FastRand r;
-
-  std::vector<BPPt>::iterator begin = pts3d.begin();
-  std::vector<BPPt>::iterator end = pts3d.end();
-
-  std::vector<MyVec> seeds;
-
-  std::vector<std::pair<Ray, int>> lines;
-
-  while(end-begin >= kMinMatch){ // find as many tracks as possible
-
-    // TODO - keep these up-to-date as we go, somehow
-    static std::array<std::vector<MinimalPt>, 3> mpts;
-    for(int view = 0; view < 3; ++view) mpts[view].clear();
-
-    for(auto it = begin; it != end; ++it)
-      mpts[it->view].emplace_back(it->z, it->ray.Origin().x);
-
-
-    // Remove points that are so far away from others that they can't possibly
-    // be in a valid track.
-    static std::array<std::vector<MinimalPt>, 3> mpts_dense;
-
-    for(int view = 0; view < 3; ++view){
-      mpts_dense[view].clear();
-
-      for(const MinimalPt& p: mpts[view]){
-        bool ok = false;
-        for(const MinimalPt& q: mpts[view]){
-          if(&q != &p && p.DistSq(q) <= sqr(maxdL)){
-            ok = true;
-            break;
-          }
-        } // end for q
-        if(ok) mpts_dense[view].push_back(p);
-      } // end for p
-    } // end for view
-
 
     const std::array<View, 3> views = {View(mpts[0], dirs[0], perps[0]),
                                        View(mpts[1], dirs[1], perps[1]),
                                        View(mpts[2], dirs[2], perps[2])};
 
-    CandidateLinesRandom(10000, begin, end, views, r, lines);
-    CandidateLinesGreedy(begin, end, views, r, lines);
-    CandidateLinesSeedsIncremental(seeds, views, lines);
+    // TODO skip any event with a very small view
 
-    std::cout << lines.size() << " candidate lines" << std::endl;
-    if(lines.empty()) break;
+    std::array<std::vector<Result>, 3> results;
+    PopulateResultsTable(mpts, results);
 
-    while(!lines.empty()){
-      // Put the best candidate last and the second-best candidate penultimate
-      if(lines.size() >= 2){
-        std::nth_element(lines.begin(), lines.end()-2, lines.end(),
-                         [](const std::pair<Ray, int>& a,
-                            const std::pair<Ray, int>& b)
-                         {
-                           return a.second < b.second; // Longest last
-                         });
-      }
+    const Ray bestRay = BestRay(results, views, pts_by_view);
+    double lambda0, lambda1;
+    const std::vector<MyVec> sps = ProjectPoints(bestRay, pts3d,
+                                                 lambda0, lambda1);
 
-      // Update the score of the line that's top of the pile
-      lines.back().second = LongestChainCount(views, lines.back().first, kMinMatch);
-      // If it's now terrible, discard it
-      if(lines.back().second < kMinMatch){lines.pop_back(); continue;}
-      // If there's no competition, go with it
-      if(lines.size() == 1) break;
-      // If it beats the closest competition (even though that one may not yet
-      // be updated (can only get smaller)) then we go with it. Otherwise go
-      // around the loop and let this candidate get shuffled lower.
-      if(lines.back().second >= (&lines.back()-1)->second) break;
-    }
+    AddArtTrack2(bestRay, lambda0, lambda1,
+                 trkcol.get(), assns.get(), evt, hits);
 
-    if(lines.empty()) break;
-
-    const int expect = lines.back().second;
-
-    if(expect < kMinMatch) break;
-
-    const Ray line = lines.back().first;
-    lines.pop_back();
-
-    const int xcheck = LongestChainApply(begin, end, line, kMinMatch);
-
-    if(xcheck != expect){
-      std::cout <<  "** Mismatch between Count: " << expect
-                << " and Apply: " << xcheck << " **" << std::endl;
-    }
-
-    float L0 = +std::numeric_limits<float>::max();
-    float L1 = -std::numeric_limits<float>::max();
-
-    for(auto it = begin; it != end; ++it){
-      L0 = std::min(L0, line.ClosestLambdaToRay(it->ray));
-      L1 = std::max(    line.ClosestLambdaToRay(it->ray), L1);
-    }
-
-    const MyVec r0 = line.Origin() + L0 * line.Dir();
-    const MyVec r1 = line.Origin() + L1 * line.Dir();
-
-    AddArtTrack(line, begin, end, r0, r1,
-                trkcol.get(), assns.get(), evt, hits);
-
-    seeds.push_back(r0);
-    seeds.push_back(r1);
-
-    // Now focus on the subset of points that aren't in this track
-    end = begin;
-    begin = pts3d.begin();
-
-    std::cout << "Made track with " << xcheck << " hits"
-              << ", " << (end-begin) << " remain"
-              << std::endl;
-  } // end while
-
-  // IDEA - consider leaving the points at the extreme ends of this track
-  // to be used in future tracks - ie they could share one point at the
-  // ends. Note that the track points currently aren't sorted.
-
-  // IDEA - try extending existing lines by adding just two more points to
-  // them.
-
-  // IDEA - scan all 2-point combinations in each view, then try combinations
-  // of the best. Can set a bound on the score of the 3D track from the sum of
-  // the two views and the best possible from the third view
+    AddSpacePoints(sps, spscol.get());
+  } // end for itrk
 
   evt.put(std::move(trkcol));
   evt.put(std::move(assns));
-#endif
+
+  evt.put(std::move(spscol));
 }
 
 } // end namespace quad
