@@ -1003,11 +1003,12 @@ void PopulateResultsTable(const std::array<std::vector<MinimalPt>, 3>& mpts,
         const int score = CountClosePoints(mptsv, line);
 
         local_results.emplace_back(score, i, j);
-      }
-    }
-  }
+      } // end for j
+    } // end for i
 
-  //    std::sort(local_results.rbegin(), local_results.rend());
+    // Needs to be sorted so we can safely reject those that can't reach target
+    std::sort(local_results.rbegin(), local_results.rend());
+  } // end for view
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,6 +1037,8 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
       const std::vector<BPPt>& ptsA = pts_by_view[viewA];
       const std::vector<BPPt>& ptsB = pts_by_view[viewB];
 
+      if(results[viewA].empty() || results[viewB].empty()) return bestRay;
+
       const Result resA = results[viewA][r.xorshift32()%results[viewA].size()];
       const Result resB = results[viewB][r.xorshift32()%results[viewB].size()];
 
@@ -1058,6 +1061,7 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
         // TODO figure out how to do this with lower_bound et al
         for(int view = 0; view < 3; ++view){
           while(!results[view].empty() && results[view].back().score < bestMinScore) results[view].pop_back();
+          if(results[view].empty()) return bestRay;
         }
 
         std::cout << " now " << results[viewA].size() << " " << results[viewB].size() << " " << results[viewC].size() << std::endl;
@@ -1066,15 +1070,122 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
       else{
         ++nNoProg;
       }
-    }
-  }
+    } // end for vi
+  } // end while
 
   return bestRay;
 }
 
 // ---------------------------------------------------------------------------
-  std::vector<MyVec> ProjectPoints(const Ray& ray, std::vector<BPPt>& pts,
-                                   double& lambda0, double& lambda1)
+std::vector<BPPt> ExtractClosePoints(const Ray& ray, std::vector<BPPt>& pts)
+{
+  std::vector<BPPt> ret;
+
+  std::vector<BPPt> rejects;
+  rejects.reserve(pts.size());
+
+  for(const BPPt& pt: pts){
+    // https://en.wikipedia.org/wiki/Skew_lines#Distance
+    const UnitVec n = ray.Dir().Cross(pt.ray.Dir());
+    const MyVec dos = ray.Origin()-pt.ray.Origin();
+    const double d = fabs(n.Dot(dos));
+
+    if(d < maxd){
+      ret.push_back(pt);
+    }
+    else{
+      rejects.push_back(pt);
+    }
+  }
+
+  pts.swap(rejects);
+
+  return ret;
+}
+
+double ProjectPointToTrackLambda(const Ray& ray, const BPPt& pt)
+{
+  // https://en.wikipedia.org/wiki/Skew_lines#Distance
+  const UnitVec n = ray.Dir().Cross(pt.ray.Dir());
+  const MyVec dos = pt.ray.Origin()-ray.Origin();
+  const MyVec n1 = pt.ray.Dir().Cross(n);
+  return dos.Dot(n1) / ray.Dir().Dot(n1);
+}
+
+std::vector<BPPt> LongestGoodSubset(const Ray& ray, std::vector<BPPt>& pts)
+{
+  struct PtInfo
+  {
+    PtInfo(double l, const BPPt& p) : lambda(l), pt(p) {}
+
+    bool operator<(const PtInfo& i) const {return lambda < i.lambda;}
+
+    double lambda;
+    BPPt pt;
+  };
+
+  std::vector<PtInfo> infos;
+  infos.reserve(pts.size());
+
+  for(const BPPt& pt: pts){
+    infos.emplace_back(ProjectPointToTrackLambda(ray, pt), pt);
+  }
+  std::sort(infos.begin(), infos.end());
+
+  bool inTrack = false;
+  auto trackStart = infos.end();
+  int longestTrack = 0;
+  auto longestTrackStart = infos.end();
+
+  double prevLambda[3] = {infos[0].lambda, infos[0].lambda, infos[0].lambda};
+
+  for(auto it = infos.begin(); it != infos.end(); ++it){
+    bool ok = true;
+    for(int view = 0; view < 3; ++view) if(it->lambda > prevLambda[view] + maxdL) ok = false;
+
+    prevLambda[it->pt.view] = it->lambda;
+
+    if(ok && !inTrack){
+      inTrack = true;
+      trackStart = it;
+      std::cout << "Starting new track candidate at " << it-infos.begin() << std::endl;
+    }
+    else if(!ok && inTrack){
+      inTrack = false;
+      const int length = it-trackStart;
+      std::cout << "Track candidate ends at " << it-infos.begin() << " for length " << length << std::endl;
+      if(length > longestTrack){
+        longestTrack = length;
+        longestTrackStart = trackStart;
+      }
+    }
+  } // end for it
+
+  // TODO this is asymmetric with the rules for starting
+  if(inTrack){
+    const int length = infos.end()-trackStart;
+    if(length > longestTrack){
+      longestTrack = length;
+      longestTrackStart = trackStart;
+    }
+  }
+
+  if(longestTrack < kMinMatch) return {};
+
+  std::vector<BPPt> ret;
+  ret.reserve(pts.size());
+  pts.clear();
+
+  for(auto it = infos.begin(); it != longestTrackStart; ++it) pts.push_back(it->pt);
+  for(auto it = longestTrackStart; it < longestTrackStart+longestTrack; ++it) ret.push_back(it->pt);
+  for(auto it = longestTrackStart+longestTrack; it < infos.end(); ++it) pts.push_back(it->pt);
+
+  return ret;
+}
+
+// ---------------------------------------------------------------------------
+std::vector<MyVec> ProjectPoints(const Ray& ray, const std::vector<BPPt>& pts,
+                                 double& lambda0, double& lambda1)
 {
   std::vector<MyVec> ret;
 
@@ -1088,25 +1199,16 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
     // https://en.wikipedia.org/wiki/Skew_lines#Distance
     const UnitVec n = ray.Dir().Cross(pt.ray.Dir());
     const MyVec dos = ray.Origin()-pt.ray.Origin();
-    const double d = fabs(n.Dot(dos));
 
-    if(d < maxd){
-      const MyVec n2 = ray.Dir().Cross(n);
-      const double lambda_pt = dos.Dot(n2) / pt.ray.Dir().Dot(n2);
-      const MyVec closest = pt.ray.Origin() + lambda_pt * pt.ray.Dir();
-      ret.push_back(closest);
+    const MyVec n2 = ray.Dir().Cross(n);
+    const double lambda_pt = dos.Dot(n2) / pt.ray.Dir().Dot(n2);
+    const MyVec closest = pt.ray.Origin() + lambda_pt * pt.ray.Dir();
+    ret.push_back(closest);
 
-      const MyVec n1 = pt.ray.Dir().Cross(n);
-      const double lambda_trk = -dos.Dot(n1) / ray.Dir().Dot(n1);
-      lambda0 = std::min(lambda0, lambda_trk);
-      lambda1 = std::max(lambda1, lambda_trk);
-    }
-    else{
-      rejects.push_back(pt);
-    }
+    const double lambda_trk = ProjectPointToTrackLambda(ray, pt);
+    lambda0 = std::min(lambda0, lambda_trk);
+    lambda1 = std::max(lambda1, lambda_trk);
   }
-
-  pts.swap(rejects);
 
   return ret;
 }
@@ -1129,7 +1231,8 @@ void QuadPts::produce(art::Event& evt)
     std::cout << dirs[i] << " " << perps[i] << std::endl;
   }
 
-  for(int itrk = 0; itrk < 3; ++itrk){
+  //  for(int itrk = 0; itrk < 3; ++itrk){
+  while(true){
     std::array<std::vector<BPPt>, 3> pts_by_view;
 
     std::array<std::vector<MinimalPt>, 3> mpts;
@@ -1140,18 +1243,39 @@ void QuadPts::produce(art::Event& evt)
       mpts[pt.view].emplace_back(pt.z, pt.ray.Origin().x);
     }
 
+    // Skip any event with a very small view
+    if(mpts[0].size() < kMinMatch ||
+       mpts[1].size() < kMinMatch ||
+       mpts[2].size() < kMinMatch) break;
+
     const std::array<View, 3> views = {View(mpts[0], dirs[0], perps[0]),
                                        View(mpts[1], dirs[1], perps[1]),
                                        View(mpts[2], dirs[2], perps[2])};
 
-    // TODO skip any event with a very small view
-
     std::array<std::vector<Result>, 3> results;
     PopulateResultsTable(mpts, results);
+    if(results[0].empty() || results[1].empty() || results[2].empty()) break;
 
     const Ray bestRay = BestRay(results, views, pts_by_view);
+
+    std::vector<BPPt> trkpts = ExtractClosePoints(bestRay, pts3d);
+    std::cout << "Found " << trkpts.size() << " 3D points close to track" << std::endl;
+    const unsigned int nClose = trkpts.size();
+    const std::vector<BPPt> goodtrkpts = LongestGoodSubset(bestRay, trkpts);
+    pts3d.insert(pts3d.end(), trkpts.begin(), trkpts.end()); // rejects
+
+    std::cout << goodtrkpts.size() << " points good of " << nClose << std::endl;
+    if(goodtrkpts.empty()){
+      std::cout << "No run in track exceeded " << kMinMatch << " - break" << std::endl;
+
+      AddArtTrack2(bestRay, -1e6, +1e6,
+                   trkcol.get(), assns.get(), evt, hits);
+
+      break;
+    }
+
     double lambda0, lambda1;
-    const std::vector<MyVec> sps = ProjectPoints(bestRay, pts3d,
+    const std::vector<MyVec> sps = ProjectPoints(bestRay, goodtrkpts,
                                                  lambda0, lambda1);
 
     AddArtTrack2(bestRay, lambda0, lambda1,
