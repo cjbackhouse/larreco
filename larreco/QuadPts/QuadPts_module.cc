@@ -1011,14 +1011,179 @@ void PopulateResultsTable(const std::array<std::vector<MinimalPt>, 3>& mpts,
   } // end for view
 }
 
+
+// ---------------------------------------------------------------------------
+std::vector<BPPt> ExtractClosePointsCopy(const Ray& ray,
+                                         const std::array<std::vector<BPPt>, 3>& pts)
+{
+  // TODO this can be done with 2D math...
+  //
+  // or for two of the views possibly with a giant bitmask?
+
+  static std::vector<BPPt> ret;
+  ret.clear();
+
+  for(int view = 0; view < 3; ++view){
+    for(const BPPt& pt: pts[view]){
+      // https://en.wikipedia.org/wiki/Skew_lines#Distance
+      const MyVec n = ray.Dir().Cross(pt.ray.Dir());
+      const MyVec dos = ray.Origin()-pt.ray.Origin();
+      const double dsq = sqr(n.Dot(dos))/n.Mag2();
+
+      if(dsq < maxdsq){
+        ret.push_back(pt);
+      }
+    }
+  }
+
+  return ret;
+}
+
+
+double ProjectPointToTrackLambda(const Ray& ray, const BPPt& pt)
+{
+  // https://en.wikipedia.org/wiki/Skew_lines#Distance
+  const MyVec dos = pt.ray.Origin()-ray.Origin();
+  const MyVec n = ray.Dir().Cross(pt.ray.Dir());
+  const MyVec n1 = pt.ray.Dir().Cross(n);
+  return dos.Dot(n1) / ray.Dir().Dot(n1);
+}
+
+// TODO also score a chisq so that an identical count which is closer to the points is preferred
+class Score
+{
+public:
+  Score() {Reset();}
+
+  int GetMin() const {return std::min(fVal[0], std::min(fVal[1], fVal[2]));}
+  int GetTot() const {return fVal[0]+fVal[1]+fVal[2];}
+
+  void Increment(int idx) {++fVal[idx];}
+  void Reset() {fVal[0] = fVal[1] = fVal[2] = 0;}
+
+
+  bool operator<(const Score& s) const
+  {
+    const int m = GetMin(), sm = s.GetMin();
+    if(m != sm) return m < sm;
+    return GetTot() < s.GetTot();
+  }
+
+  bool operator>(const Score& s) const
+  {
+    const int m = GetMin(), sm = s.GetMin();
+    if(m != sm) return m > sm;
+    return GetTot() > s.GetTot();
+  }
+protected:
+  std::array<int, 3> fVal;
+};
+
+std::ostream& operator<<(std::ostream& os, const Score& s)
+{
+  os << s.GetMin() << " (" << s.GetTot() << ")";
+  return os;
+}
+
+// TODO allow one additional hit of each view at the end of track - think about
+// symmetry of the algorithm
+Score LongestGoodSubsetHelper(const Ray& ray, const std::vector<BPPt>& pts,
+                              std::vector<BPPt>* trk_pts,
+                              std::vector<BPPt>* reject_pts)
+{
+  // TODO consider giving BPPt a float priv field and using that
+
+  struct PtInfo
+  {
+    PtInfo(double l, const BPPt* p) : lambda(l), pt(p) {}
+
+    bool operator<(const PtInfo& i) const {return lambda < i.lambda;}
+
+    // This thing gets sorted, make it as small as possible
+    float lambda;
+    const BPPt* pt;
+  };
+
+  static std::vector<PtInfo> infos;
+  //  infos.reserve(pts.size());
+  infos.clear();
+
+  for(const BPPt& pt: pts){
+    infos.emplace_back(ProjectPointToTrackLambda(ray, pt), &pt);
+  }
+  std::sort(infos.begin(), infos.end());
+
+  bool inTrack = false;
+  auto start = infos.end();
+  Score score;
+  auto bestStart = infos.end();
+  auto bestEnd = infos.end();
+  Score bestScore;
+
+  float prevLambda[3] = {infos[0].lambda, infos[0].lambda, infos[0].lambda};
+
+  // Deliberately encounter infos.end() in the loop
+  for(auto it = infos.begin(); /*it != infos.end()*/; ++it){
+    bool ok = (it != infos.end());
+
+    // Safe because if it is invalid then OK is already false
+    for(int view = 0; view < 3; ++view) ok = ok && (it->lambda < prevLambda[view] + maxdL);
+
+    if(ok && !inTrack){
+      inTrack = true;
+      start = it;
+      //      std::cout << "Starting new track candidate at " << it-infos.begin() << std::endl;
+    }
+    else if(!ok && inTrack){
+      inTrack = false;
+      //      std::cout << "Track candidate ends at " << it-infos.begin() << " for score " << score << std::endl;
+      if(score > bestScore){
+        bestScore = score;
+        bestStart = start;
+        bestEnd = it;
+      }
+      score.Reset();
+    }
+
+    if(it == infos.end()) break;
+
+    prevLambda[it->pt->view] = it->lambda;
+    if(inTrack) score.Increment(it->pt->view);
+  } // end for it
+
+  if(trk_pts && reject_pts){
+    for(auto it = infos.begin(); it != bestStart; ++it) reject_pts->push_back(*it->pt);
+    for(auto it = bestStart; it < bestEnd; ++it) trk_pts->push_back(*it->pt);
+    for(auto it = bestEnd; it < infos.end(); ++it) reject_pts->push_back(*it->pt);
+  }
+
+  return bestScore;
+}
+
+
+std::vector<BPPt> LongestGoodSubset(const Ray& ray, std::vector<BPPt>& pts)
+{
+  std::vector<BPPt> trk_pts, reject_pts;
+  trk_pts.reserve(pts.size());
+  reject_pts.reserve(pts.size());
+  const Score score = LongestGoodSubsetHelper(ray, pts, &trk_pts, &reject_pts);
+  if(score.GetMin() < kMinMatch) return {};
+  pts.swap(reject_pts);
+  return trk_pts;
+}
+
+Score CountLongestGoodSubset(const Ray& ray, const std::vector<BPPt>& pts)
+{
+  return LongestGoodSubsetHelper(ray, pts, 0, 0);
+}
+
 // ---------------------------------------------------------------------------
 // NB mutates results
 Ray BestRay(std::array<std::vector<Result>, 3>& results,
             const std::array<View, 3>& views,
             const std::array<std::vector<BPPt>, 3>& pts_by_view)
 {
-  int bestMinScore = 0;
-  int bestTotScore = 0;
+  Score bestScore;
   Ray bestRay(MyVec(0, 0, 0), MyVec(0, 0, 0));
 
   FastRand r;
@@ -1028,7 +1193,7 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
 
   int nNoProg = 0;
 
-  while(nNoProg < 1e6){
+  while(nNoProg < 1e5){//1e6){
     for(int vi = 0; vi < 3; ++vi){
       const int viewA = viewIdxs[vi][0];
       const int viewB = viewIdxs[vi][1];
@@ -1045,22 +1210,34 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
       const Ray ray = PointsToRay(ptsA[resA.hitA], ptsA[resA.hitB],
                                   ptsB[resB.hitA], ptsB[resB.hitB]);
 
+      const Score score3d = CountLongestGoodSubset(ray, ExtractClosePointsCopy(ray, pts_by_view));
+      /*
       const int scoreC = CountClosePoints(views[viewC], ray);
       const int totScore = resA.score + resB.score + scoreC;
       const int minScore = std::min(std::min(resA.score, resB.score), scoreC);
 
+
       if(minScore > bestMinScore ||
          (minScore == bestMinScore && totScore > bestTotScore)){
+
+
         std::cout << "*** new best score " << minScore << std::endl;
         std::cout << "  " << resA.score << " + " << resB.score << " + " << scoreC << std::endl;
         bestMinScore = minScore;
         bestTotScore = totScore;
+      */
+
+      if(score3d > bestScore){//bestMinScore){
+        std::cout << "*** new best score " << score3d << std::endl;
+
+        bestScore = score3d;
+
         bestRay = ray;
         nNoProg = 0;
 
         // TODO figure out how to do this with lower_bound et al
         for(int view = 0; view < 3; ++view){
-          while(!results[view].empty() && results[view].back().score < bestMinScore) results[view].pop_back();
+          while(!results[view].empty() && results[view].back().score < bestScore.GetMin()) results[view].pop_back();
           if(results[view].empty()) return bestRay;
         }
 
@@ -1069,6 +1246,7 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
       }
       else{
         ++nNoProg;
+        if(nNoProg%10000 == 0) std::cout << "No prog: " << nNoProg << std::endl;
       }
     } // end for vi
   } // end while
@@ -1086,11 +1264,11 @@ std::vector<BPPt> ExtractClosePoints(const Ray& ray, std::vector<BPPt>& pts)
 
   for(const BPPt& pt: pts){
     // https://en.wikipedia.org/wiki/Skew_lines#Distance
-    const UnitVec n = ray.Dir().Cross(pt.ray.Dir());
+    const MyVec n = ray.Dir().Cross(pt.ray.Dir());
     const MyVec dos = ray.Origin()-pt.ray.Origin();
-    const double d = fabs(n.Dot(dos));
+    const double dsq = sqr(n.Dot(dos))/n.Mag2();
 
-    if(d < maxd){
+    if(dsq < maxdsq){
       ret.push_back(pt);
     }
     else{
@@ -1099,86 +1277,6 @@ std::vector<BPPt> ExtractClosePoints(const Ray& ray, std::vector<BPPt>& pts)
   }
 
   pts.swap(rejects);
-
-  return ret;
-}
-
-double ProjectPointToTrackLambda(const Ray& ray, const BPPt& pt)
-{
-  // https://en.wikipedia.org/wiki/Skew_lines#Distance
-  const UnitVec n = ray.Dir().Cross(pt.ray.Dir());
-  const MyVec dos = pt.ray.Origin()-ray.Origin();
-  const MyVec n1 = pt.ray.Dir().Cross(n);
-  return dos.Dot(n1) / ray.Dir().Dot(n1);
-}
-
-std::vector<BPPt> LongestGoodSubset(const Ray& ray, std::vector<BPPt>& pts)
-{
-  struct PtInfo
-  {
-    PtInfo(double l, const BPPt& p) : lambda(l), pt(p) {}
-
-    bool operator<(const PtInfo& i) const {return lambda < i.lambda;}
-
-    double lambda;
-    BPPt pt;
-  };
-
-  std::vector<PtInfo> infos;
-  infos.reserve(pts.size());
-
-  for(const BPPt& pt: pts){
-    infos.emplace_back(ProjectPointToTrackLambda(ray, pt), pt);
-  }
-  std::sort(infos.begin(), infos.end());
-
-  bool inTrack = false;
-  auto trackStart = infos.end();
-  int longestTrack = 0;
-  auto longestTrackStart = infos.end();
-
-  double prevLambda[3] = {infos[0].lambda, infos[0].lambda, infos[0].lambda};
-
-  for(auto it = infos.begin(); it != infos.end(); ++it){
-    bool ok = true;
-    for(int view = 0; view < 3; ++view) if(it->lambda > prevLambda[view] + maxdL) ok = false;
-
-    prevLambda[it->pt.view] = it->lambda;
-
-    if(ok && !inTrack){
-      inTrack = true;
-      trackStart = it;
-      std::cout << "Starting new track candidate at " << it-infos.begin() << std::endl;
-    }
-    else if(!ok && inTrack){
-      inTrack = false;
-      const int length = it-trackStart;
-      std::cout << "Track candidate ends at " << it-infos.begin() << " for length " << length << std::endl;
-      if(length > longestTrack){
-        longestTrack = length;
-        longestTrackStart = trackStart;
-      }
-    }
-  } // end for it
-
-  // TODO this is asymmetric with the rules for starting
-  if(inTrack){
-    const int length = infos.end()-trackStart;
-    if(length > longestTrack){
-      longestTrack = length;
-      longestTrackStart = trackStart;
-    }
-  }
-
-  if(longestTrack < kMinMatch) return {};
-
-  std::vector<BPPt> ret;
-  ret.reserve(pts.size());
-  pts.clear();
-
-  for(auto it = infos.begin(); it != longestTrackStart; ++it) pts.push_back(it->pt);
-  for(auto it = longestTrackStart; it < longestTrackStart+longestTrack; ++it) ret.push_back(it->pt);
-  for(auto it = longestTrackStart+longestTrack; it < infos.end(); ++it) pts.push_back(it->pt);
 
   return ret;
 }
@@ -1231,7 +1329,6 @@ void QuadPts::produce(art::Event& evt)
     std::cout << dirs[i] << " " << perps[i] << std::endl;
   }
 
-  //  for(int itrk = 0; itrk < 3; ++itrk){
   while(true){
     std::array<std::vector<BPPt>, 3> pts_by_view;
 
@@ -1262,17 +1359,23 @@ void QuadPts::produce(art::Event& evt)
     std::cout << "Found " << trkpts.size() << " 3D points close to track" << std::endl;
     const unsigned int nClose = trkpts.size();
     const std::vector<BPPt> goodtrkpts = LongestGoodSubset(bestRay, trkpts);
-    pts3d.insert(pts3d.end(), trkpts.begin(), trkpts.end()); // rejects
 
     std::cout << goodtrkpts.size() << " points good of " << nClose << std::endl;
     if(goodtrkpts.empty()){
-      std::cout << "No run in track exceeded " << kMinMatch << " - break" << std::endl;
+      std::cout << "No run in track exceeded " << kMinMatch << std::endl;
+      break;
 
+      /*
+      // Show the rejected ray
       AddArtTrack2(bestRay, -1e6, +1e6,
                    trkcol.get(), assns.get(), evt, hits);
 
       break;
+      */
     }
+
+    // Put the rejects back in the heap
+    pts3d.insert(pts3d.end(), trkpts.begin(), trkpts.end());
 
     double lambda0, lambda1;
     const std::vector<MyVec> sps = ProjectPoints(bestRay, goodtrkpts,
@@ -1282,12 +1385,22 @@ void QuadPts::produce(art::Event& evt)
                  trkcol.get(), assns.get(), evt, hits);
 
     AddSpacePoints(sps, spscol.get());
+
   } // end for itrk
 
   evt.put(std::move(trkcol));
   evt.put(std::move(assns));
 
   evt.put(std::move(spscol));
+
+  // TODO could already require no big 2D gaps when constructing the score
+  // table
+
+  // TODO require tracks to overlap at least a little in x. But one stray hit
+  // can trick that.
+
+  // TODO vastly reduce number of 2D tracks by requiring that none are subsets
+  // of each others' hits.
 }
 
 } // end namespace quad
