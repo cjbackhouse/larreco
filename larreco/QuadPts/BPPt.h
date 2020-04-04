@@ -31,5 +31,6 @@ namespace quad
 
     int hitIdx;
     int priv; // for use by algorithms
+    mutable float privF; // ditto
   };
 }

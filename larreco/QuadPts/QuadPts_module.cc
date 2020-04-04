@@ -1091,52 +1091,43 @@ Score LongestGoodSubsetHelper(const Ray& ray, const std::vector<BPPt>& pts,
                               std::vector<BPPt>* trk_pts,
                               std::vector<BPPt>* reject_pts)
 {
-  // TODO consider giving BPPt a float priv field and using that
-
-  struct PtInfo
-  {
-    PtInfo(double l, const BPPt* p) : lambda(l), pt(p) {}
-
-    bool operator<(const PtInfo& i) const {return lambda < i.lambda;}
-
-    // This thing gets sorted, make it as small as possible
-    float lambda;
-    const BPPt* pt;
-  };
-
-  static std::vector<PtInfo> infos;
-  //  infos.reserve(pts.size());
-  infos.clear();
-
+  static std::vector<const BPPt*> ppts;
+  ppts.clear();
   for(const BPPt& pt: pts){
-    infos.emplace_back(ProjectPointToTrackLambda(ray, pt), &pt);
+    pt.privF = ProjectPointToTrackLambda(ray, pt);
+    ppts.push_back(&pt);
   }
-  std::sort(infos.begin(), infos.end());
+
+  // Oddly stable_sort is quite a bit faster than regular sort
+  std::stable_sort(ppts.begin(), ppts.end(),
+                   [](const BPPt* a, const BPPt* b){return a->privF < b->privF;});
 
   bool inTrack = false;
-  auto start = infos.end();
+  auto start = ppts.end();
   Score score;
-  auto bestStart = infos.end();
-  auto bestEnd = infos.end();
+  auto bestStart = ppts.end();
+  auto bestEnd = ppts.end();
   Score bestScore;
 
-  float prevLambda[3] = {infos[0].lambda, infos[0].lambda, infos[0].lambda};
+  float prevLambda[3] = {ppts[0]->privF, ppts[0]->privF, ppts[0]->privF};
 
-  // Deliberately encounter infos.end() in the loop
-  for(auto it = infos.begin(); /*it != infos.end()*/; ++it){
-    bool ok = (it != infos.end());
+  // Deliberately encounter ppts.end() in the loop
+  for(auto it = ppts.begin(); /*it != ppts.end()*/; ++it){
+    bool ok = (it != ppts.end());
 
-    // Safe because if it is invalid then OK is already false
-    for(int view = 0; view < 3; ++view) ok = ok && (it->lambda < prevLambda[view] + maxdL);
+    const BPPt& pt = ok ? **it : **ppts.begin();
+
+    // Safe because if 'it' is invalid then OK is already false
+    for(int view = 0; view < 3; ++view) ok = ok && (pt.privF < prevLambda[view] + maxdL);
 
     if(ok && !inTrack){
       inTrack = true;
       start = it;
-      //      std::cout << "Starting new track candidate at " << it-infos.begin() << std::endl;
+      //      std::cout << "Starting new track candidate at " << it-ppts.begin() << std::endl;
     }
     else if(!ok && inTrack){
       inTrack = false;
-      //      std::cout << "Track candidate ends at " << it-infos.begin() << " for score " << score << std::endl;
+      //      std::cout << "Track candidate ends at " << it-ppts.begin() << " for score " << score << std::endl;
       if(score > bestScore){
         bestScore = score;
         bestStart = start;
@@ -1145,16 +1136,16 @@ Score LongestGoodSubsetHelper(const Ray& ray, const std::vector<BPPt>& pts,
       score.Reset();
     }
 
-    if(it == infos.end()) break;
+    if(it == ppts.end()) break;
 
-    prevLambda[it->pt->view] = it->lambda;
-    if(inTrack) score.Increment(it->pt->view);
+    prevLambda[pt.view] = pt.privF;
+    if(inTrack) score.Increment(pt.view);
   } // end for it
 
   if(trk_pts && reject_pts){
-    for(auto it = infos.begin(); it != bestStart; ++it) reject_pts->push_back(*it->pt);
-    for(auto it = bestStart; it < bestEnd; ++it) trk_pts->push_back(*it->pt);
-    for(auto it = bestEnd; it < infos.end(); ++it) reject_pts->push_back(*it->pt);
+    for(auto it = ppts.begin(); it != bestStart; ++it) reject_pts->push_back(**it);
+    for(auto it = bestStart; it < bestEnd; ++it) trk_pts->push_back(**it);
+    for(auto it = bestEnd; it < ppts.end(); ++it) reject_pts->push_back(**it);
   }
 
   return bestScore;
@@ -1207,6 +1198,12 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
       const Result resA = results[viewA][r.xorshift32()%results[viewA].size()];
       const Result resB = results[viewB][r.xorshift32()%results[viewB].size()];
 
+      if(resA.score+resB.score+results[viewC].front().score <= bestScore.GetTot()){
+        //        std::cout << "Skipping on the basis of Tot score" << std::endl;
+        ++nNoProg;
+        continue;
+      }
+
       const Ray ray = PointsToRay(ptsA[resA.hitA], ptsA[resA.hitB],
                                   ptsB[resB.hitA], ptsB[resB.hitB]);
 
@@ -1243,6 +1240,12 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
 
         std::cout << " now " << results[viewA].size() << " " << results[viewB].size() << " " << results[viewC].size() << std::endl;
         // TODO potentially exhaustive search once the product of the two smallest is minimized
+
+
+        if(results[0][0].score + results[1][0].score + results[2][0].score <= bestScore.GetTot()){
+          std::cout << "We have found the guaranteed best score - break" << std::endl;
+          return bestRay;
+        }
       }
       else{
         ++nNoProg;
@@ -1396,11 +1399,8 @@ void QuadPts::produce(art::Event& evt)
   // TODO could already require no big 2D gaps when constructing the score
   // table
 
-  // TODO require tracks to overlap at least a little in x. But one stray hit
-  // can trick that.
-
   // TODO vastly reduce number of 2D tracks by requiring that none are subsets
-  // of each others' hits.
+  // of each others' hits / have similar gradient and intercept
 }
 
 } // end namespace quad
