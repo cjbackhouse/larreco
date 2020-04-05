@@ -22,12 +22,14 @@ namespace quad
 
   struct BPPt
   {
-    BPPt(MyVec _origin, MyVec _dir, int _view, int _idx) : ray(_origin, _dir), view(_view), hitIdx(_idx), priv(0) {}
-    BPPt(MyVec _origin, UnitVec _dir, int _view, int _idx) : ray(_origin, _dir), view(_view), hitIdx(_idx), priv(0) {}
+    BPPt(MyVec _origin, MyVec _dir, int _view, int _idx) : ray(_origin, _dir), view(_view), nTrk(0), hitIdx(_idx), priv(0) {}
+    BPPt(MyVec _origin, UnitVec _dir, int _view, int _idx) : ray(_origin, _dir), view(_view), nTrk(0), hitIdx(_idx), priv(0) {}
 
     Ray ray;
     int view;
     float z;
+
+    int nTrk;
 
     int hitIdx;
     int priv; // for use by algorithms

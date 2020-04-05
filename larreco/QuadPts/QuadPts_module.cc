@@ -44,7 +44,7 @@ template<class T> inline T cube(T x){return x*x*x;}
 
 
 const float maxdL = 2; // 2cm in 3D
-const float maxd = .25; // 2.5mm laterally
+const float maxd = .1;//25; // 1mm laterally
 const float maxdsq = sqr(maxd);
 
 const int kMinMatch = 6;//10;//20; // Don't make tracks smaller than this
@@ -172,11 +172,12 @@ Ray PointsToRay(BPPt a, BPPt b, BPPt c, BPPt d)
 
 struct MinimalPt
 {
-  MinimalPt(float _z, float _x) : z(_z), x(_x) {}
+  MinimalPt(float _z, float _x, int _n) : z(_z), x(_x), nTrk(_n) {}
 
   float DistSq(const MinimalPt& p) const {return sqr(z-p.z) + sqr(x-p.x);}
 
   float z, x;
+  int nTrk;
 };
 
 struct MinimalLine
@@ -416,7 +417,7 @@ int CountClosePoints(const std::vector<MinimalPt>& pts, const MinimalLine& line)
     // Hmm, seems not really
     //      const float dz2 = sqr(line.dzdx*p.x + line.z0 - p.z);
 
-    if(dz < maxdz) ++ret;
+    if(dz < maxdz) ret += 2-p.nTrk;
   } // end for p
 
   return ret;
@@ -436,7 +437,7 @@ int CountClosePointsBulk(const std::vector<MinimalPt>& pts,
     int score = 0;
     for(const MinimalPt& p: pts){
       const float dzsq = sqr(line.dzdx*p.x + line.z0 - p.z);
-      if(dzsq < maxdzsq) ++score;
+      if(dzsq < maxdzsq) score += 2-p.nTrk;
     } // end for p
     ret = std::max(ret, score);
   }
@@ -1058,7 +1059,7 @@ public:
   int GetMin() const {return std::min(fVal[0], std::min(fVal[1], fVal[2]));}
   int GetTot() const {return fVal[0]+fVal[1]+fVal[2];}
 
-  void Increment(int idx) {++fVal[idx];}
+  void Increment(int idx, int delta = 1) {fVal[idx] += delta;}
   void Reset() {fVal[0] = fVal[1] = fVal[2] = 0;}
 
 
@@ -1139,7 +1140,7 @@ Score LongestGoodSubsetHelper(const Ray& ray, const std::vector<BPPt>& pts,
     if(it == ppts.end()) break;
 
     prevLambda[pt.view] = pt.privF;
-    if(inTrack) score.Increment(pt.view);
+    if(inTrack) score.Increment(pt.view, 2-pt.nTrk);
   } // end for it
 
   if(trk_pts && reject_pts){
@@ -1340,7 +1341,7 @@ void QuadPts::produce(art::Event& evt)
     for(const BPPt& pt: pts3d){
       // TODO ideally GetPts3D would already do this
       pts_by_view[pt.view].push_back(pt);
-      mpts[pt.view].emplace_back(pt.z, pt.ray.Origin().x);
+      mpts[pt.view].emplace_back(pt.z, pt.ray.Origin().x, pt.nTrk);
     }
 
     // Skip any event with a very small view
@@ -1361,7 +1362,7 @@ void QuadPts::produce(art::Event& evt)
     std::vector<BPPt> trkpts = ExtractClosePoints(bestRay, pts3d);
     std::cout << "Found " << trkpts.size() << " 3D points close to track" << std::endl;
     const unsigned int nClose = trkpts.size();
-    const std::vector<BPPt> goodtrkpts = LongestGoodSubset(bestRay, trkpts);
+    std::vector<BPPt> goodtrkpts = LongestGoodSubset(bestRay, trkpts);
 
     std::cout << goodtrkpts.size() << " points good of " << nClose << std::endl;
     if(goodtrkpts.empty()){
@@ -1379,6 +1380,12 @@ void QuadPts::produce(art::Event& evt)
 
     // Put the rejects back in the heap
     pts3d.insert(pts3d.end(), trkpts.begin(), trkpts.end());
+
+    // And selected points that aren't in enough tracks yet
+    for(BPPt& pt: goodtrkpts){
+      ++pt.nTrk;
+      if(pt.nTrk < 2) pts3d.push_back(pt);
+    }
 
     double lambda0, lambda1;
     const std::vector<MyVec> sps = ProjectPoints(bestRay, goodtrkpts,
