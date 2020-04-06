@@ -579,10 +579,13 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
   // All the ways to have 2 views (order doesn't matter) and then the third (special) view
   const int viewIdxs[3][3] = {{0, 1, 2}, {0, 2, 1}, {1, 2, 0}};
 
-  int nNoProg = 0;
+  int nAttempts = 0;
+  int lastProg = -1;
 
-  while(nNoProg < 1e5){//1e6){
+  while(nAttempts < std::max(10*1000, 3*lastProg)){
     for(int vi = 0; vi < 3; ++vi){
+      ++nAttempts;
+
       const int viewA = viewIdxs[vi][0];
       const int viewB = viewIdxs[vi][1];
       const int viewC = viewIdxs[vi][2];
@@ -597,7 +600,6 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
 
       if(resA.score+resB.score+results[viewC].front().score <= bestScore.GetTot()){
         //        std::cout << "Skipping on the basis of Tot score" << std::endl;
-        ++nNoProg;
         continue;
       }
 
@@ -607,12 +609,13 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
       const Score score3d = CountLongestGoodSubset(ray, ExtractClosePointsCopy(ray, pts_by_view));
 
       if(score3d > bestScore){
+        lastProg = nAttempts;
+
         std::cout << "*** new best score " << score3d << std::endl;
 
         bestScore = score3d;
 
         bestRay = ray;
-        nNoProg = 0;
 
         // TODO figure out how to do this with lower_bound et al
         for(int view = 0; view < 3; ++view){
@@ -630,8 +633,7 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
         }
       }
       else{
-        ++nNoProg;
-        if(nNoProg%10000 == 0) std::cout << "No prog: " << nNoProg << std::endl;
+        if(nAttempts%10000 == 0) std::cout << "Attempts / last: " << nAttempts << " " << lastProg << std::endl;
       }
     } // end for vi
   } // end while
@@ -861,6 +863,8 @@ void QuadPts::produce(art::Event& evt)
 
   // TODO vastly reduce number of 2D tracks by requiring that none are subsets
   // of each others' hits / have similar gradient and intercept
+
+  // TODO write out rejected hits
 }
 
 } // end namespace quad
