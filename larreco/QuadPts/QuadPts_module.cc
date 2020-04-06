@@ -936,50 +936,6 @@ void AddArtTrack(const Ray& line,
 }
 
 // ---------------------------------------------------------------------------
-void AddArtTrack2(const Ray& line,
-                  //                 std::vector<BPPt>::iterator begin,
-                  //                 std::vector<BPPt>::iterator end,
-                  double lambda0, double lambda1,
-                  std::vector<recob::Track>* trkcol,
-                  art::Assns<recob::Track, recob::Hit>* assns,
-                  const art::Event& evt,
-                  const art::Handle<std::vector<recob::Hit>>& hits)
-{
-  // Magic up a pointer to the track we're about to make
-  const art::ProductID id = evt.getProductID<std::vector<recob::Track>>("");
-  const art::EDProductGetter* pg = evt.productGetter(id);
-  const art::Ptr<recob::Track> ptrk(id, trkcol->size(), pg);
-
-  //  for(auto it = begin; it != end; ++it)
-    //    assns->addSingle(ptrk, art::Ptr<recob::Hit>(hits, it->hitIdx));
-
-  const MyVec r0 = line.Origin() + lambda0 * line.Dir();
-  const MyVec r1 = line.Origin() + lambda1 * line.Dir();
-
-  std::vector<geo::Point_t> tps;
-  tps.emplace_back(r0.x, r0.y, r0.z);
-  tps.emplace_back(r1.x, r1.y, r1.z);
-
-  const recob::TrackTrajectory traj(std::move(tps),
-                                    std::vector<geo::Vector_t>(tps.size()), // momenta
-                                    std::vector<recob::TrajectoryPointFlags>(tps.size()),
-                                    false);
-
-  trkcol->emplace_back(traj, 0, 0, 0, recob::Track::SMatrixSym55(), recob::Track::SMatrixSym55(), trkcol->size()+1);
-}
-
-// ---------------------------------------------------------------------------
-void AddSpacePoints(const std::vector<MyVec>& sps,
-                    std::vector<recob::SpacePoint>* spscol)
-{
-  for(MyVec sp: sps){
-    const double xyz[3] = {sp.x, sp.y, sp.z};
-    const double exyz[6] = {0, 0, 0, 0, 0, 0};
-    spscol->emplace_back(xyz, exyz, 0);
-  }
-}
-
-// ---------------------------------------------------------------------------
 struct Result
 {
   Result(int s, int a, int b) : score(s), hitA(a), hitB(b) {}
@@ -1286,33 +1242,100 @@ std::vector<BPPt> ExtractClosePoints(const Ray& ray, std::vector<BPPt>& pts)
 }
 
 // ---------------------------------------------------------------------------
-std::vector<MyVec> ProjectPoints(const Ray& ray, const std::vector<BPPt>& pts,
-                                 double& lambda0, double& lambda1)
+struct FinalTrack
 {
-  std::vector<MyVec> ret;
+  FinalTrack(const Ray& r, float l0, float l1) : ray(r), lambda0(l0), lambda1(l1) {}
+  Ray ray;
+  float lambda0, lambda1;
+};
 
-  lambda0 = +std::numeric_limits<double>::infinity();
-  lambda1 = -std::numeric_limits<double>::infinity();
-
-  std::vector<BPPt> rejects;
-  rejects.reserve(pts.size());
+// ---------------------------------------------------------------------------
+FinalTrack ToFinalTrack(const Ray& ray, const std::vector<BPPt>& pts)
+{
+  float lambda0 = +std::numeric_limits<double>::infinity();
+  float lambda1 = -std::numeric_limits<double>::infinity();
 
   for(const BPPt& pt: pts){
-    // https://en.wikipedia.org/wiki/Skew_lines#Distance
-    const UnitVec n = ray.Dir().Cross(pt.ray.Dir());
-    const MyVec dos = ray.Origin()-pt.ray.Origin();
-
-    const MyVec n2 = ray.Dir().Cross(n);
-    const double lambda_pt = dos.Dot(n2) / pt.ray.Dir().Dot(n2);
-    const MyVec closest = pt.ray.Origin() + lambda_pt * pt.ray.Dir();
-    ret.push_back(closest);
-
-    const double lambda_trk = ProjectPointToTrackLambda(ray, pt);
+    const float lambda_trk = ProjectPointToTrackLambda(ray, pt);
     lambda0 = std::min(lambda0, lambda_trk);
     lambda1 = std::max(lambda1, lambda_trk);
   }
 
-  return ret;
+  return FinalTrack(ray, lambda0, lambda1);
+}
+
+// ---------------------------------------------------------------------------
+bool ProjectPoint(const std::vector<FinalTrack>& trks, const BPPt& pt,
+                  MyVec& ret)
+{
+  ret = MyVec(0, 0, 0);
+  float totW = 0;
+
+  for(const FinalTrack& trk: trks){
+    const float lambda_trk = ProjectPointToTrackLambda(trk.ray, pt);
+    if(lambda_trk < trk.lambda0 || lambda_trk > trk.lambda1) continue;
+
+    // https://en.wikipedia.org/wiki/Skew_lines#Distance
+    const UnitVec n = trk.ray.Dir().Cross(pt.ray.Dir());
+    const MyVec dos = trk.ray.Origin()-pt.ray.Origin();
+
+    const double d = fabs(n.Dot(dos));
+    if(d > maxd) continue;
+
+    const MyVec n2 = trk.ray.Dir().Cross(n);
+    const double lambda_pt = dos.Dot(n2) / pt.ray.Dir().Dot(n2);
+    const MyVec closest = pt.ray.Origin() + lambda_pt * pt.ray.Dir();
+
+    const float w = maxd-d; // TODO what should the weighting function be?
+    ret += w*closest;
+    totW += w;
+  }
+
+  if(totW == 0) return false;
+
+  ret *= 1./totW;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+void AddArtTrack2(const FinalTrack& trk,
+                  //                 std::vector<BPPt>::iterator begin,
+                  //                 std::vector<BPPt>::iterator end,
+                  std::vector<recob::Track>* trkcol,
+                  art::Assns<recob::Track, recob::Hit>* assns,
+                  const art::Event& evt,
+                  const art::Handle<std::vector<recob::Hit>>& hits)
+{
+  // Magic up a pointer to the track we're about to make
+  const art::ProductID id = evt.getProductID<std::vector<recob::Track>>("");
+  const art::EDProductGetter* pg = evt.productGetter(id);
+  const art::Ptr<recob::Track> ptrk(id, trkcol->size(), pg);
+
+  //  for(auto it = begin; it != end; ++it)
+    //    assns->addSingle(ptrk, art::Ptr<recob::Hit>(hits, it->hitIdx));
+
+  const MyVec r0 = trk.ray.Origin() + trk.lambda0 * trk.ray.Dir();
+  const MyVec r1 = trk.ray.Origin() + trk.lambda1 * trk.ray.Dir();
+
+  std::vector<geo::Point_t> tps;
+  tps.emplace_back(r0.x, r0.y, r0.z);
+  tps.emplace_back(r1.x, r1.y, r1.z);
+
+  const recob::TrackTrajectory traj(std::move(tps),
+                                    std::vector<geo::Vector_t>(tps.size()), // momenta
+                                    std::vector<recob::TrajectoryPointFlags>(tps.size()),
+                                    false);
+
+  trkcol->emplace_back(traj, 0, 0, 0, recob::Track::SMatrixSym55(), recob::Track::SMatrixSym55(), trkcol->size()+1);
+}
+
+// ---------------------------------------------------------------------------
+void AddSpacePoint(const MyVec& sp,
+                   std::vector<recob::SpacePoint>* spscol)
+{
+  const double xyz[3] = {sp.x, sp.y, sp.z};
+  const double exyz[6] = {0, 0, 0, 0, 0, 0};
+  spscol->emplace_back(xyz, exyz, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1328,10 +1351,13 @@ void QuadPts::produce(art::Event& evt)
 
   std::vector<UnitVec> dirs, perps;
   std::vector<BPPt> pts3d = GetPts3D(*hits, geom, detprop, &dirs, &perps);
+  const std::vector<BPPt> pts3d_all = pts3d;
 
   for(int i = 0; i < 3; ++i){
     std::cout << dirs[i] << " " << perps[i] << std::endl;
   }
+
+  std::vector<FinalTrack> finals;
 
   while(true){
     std::array<std::vector<BPPt>, 3> pts_by_view;
@@ -1387,16 +1413,18 @@ void QuadPts::produce(art::Event& evt)
       if(pt.nTrk < 2) pts3d.push_back(pt);
     }
 
-    double lambda0, lambda1;
-    const std::vector<MyVec> sps = ProjectPoints(bestRay, goodtrkpts,
-                                                 lambda0, lambda1);
-
-    AddArtTrack2(bestRay, lambda0, lambda1,
-                 trkcol.get(), assns.get(), evt, hits);
-
-    AddSpacePoints(sps, spscol.get());
-
+    finals.push_back(ToFinalTrack(bestRay, goodtrkpts));
   } // end for itrk
+
+  for(const FinalTrack& t: finals){
+    AddArtTrack2(t, trkcol.get(), assns.get(), evt, hits);
+  }
+
+  for(const BPPt& pt: pts3d_all){
+    MyVec sp(0, 0, 0);
+    if(ProjectPoint(finals, pt, sp)) AddSpacePoint(sp, spscol.get());
+  }
+
 
   evt.put(std::move(trkcol));
   evt.put(std::move(assns));
