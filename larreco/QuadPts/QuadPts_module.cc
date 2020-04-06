@@ -134,35 +134,7 @@ Ray PointsToRay(const std::array<BPPt, 4>& pts)
     // garbage return is OK, will just score badly
   }
 
-//  std::cout << "OK? " << ok << std::endl;
-
-/*
-  const Ray ret(MyVec(0, v[2], v[3]), MyVec(1, v[0], v[1]));
-
-  for(int i = 0; i < 4; ++i){
-    const UnitVec d = pts[i].ray.Dir();
-    const MyVec o   = pts[i].ray.Origin();
-    std::cout << ret.Dir().Cross(d).Dot(o-ret.Origin()) << std::endl;
-  }
-*/
-
   return Ray(MyVec(0, v[2], v[3]), MyVec(1, v[0], v[1]));
-
-/*
-  try{
-    M.Invert();
-  }
-  catch(...){
-    std::cout << "Singular matrix in QuadPts::PointsToRay" << std::endl;
-    M.Print();
-    // Matrix will probably be garbage, but it's OK because we'll just get a
-    // bad score for the line.
-  }
-
-  const TVectorD x = M*v;
-
-  return Ray(MyVec(0, x[2], x[3]), MyVec(1, x[0], x[1]));
-*/
 }
 
 Ray PointsToRay(BPPt a, BPPt b, BPPt c, BPPt d)
@@ -191,54 +163,6 @@ struct MinimalLine
   MinimalLine(float _dzdx, float _z0) : dzdx(_dzdx), z0(_z0) {}
 
   float dzdx, z0;
-};
-
-class VPLeaf
-{
-public:
-  VPLeaf(MinimalPt _origin, float _radius,
-         std::vector<MinimalPt>::iterator begin,
-         std::vector<MinimalPt>::iterator end)
-    : origin(_origin), radius(_radius), pts(begin, end)
-  {
-  }
-
-  MinimalPt origin;
-  float radius;
-  std::vector<MinimalPt> pts;
-};
-
-class VPTree
-{
-public:
-  VPTree(std::vector<MinimalPt>::iterator begin,
-         std::vector<MinimalPt>::iterator end)
-  {
-    // Bigger hack
-    kids.emplace_back(*begin, std::numeric_limits<float>::infinity(), begin, end);
-    return;
-
-    // Adjustable parameter. This one gets ~10 pts per leaf
-    const float kRadius = 5;
-
-    while(begin != end){
-      MinimalPt origin = *begin;
-      // HACK HACK HACK
-      //      auto half = begin;
-      //      for(int i = 0; i < 10; ++i) if(half != end) ++half;
-      auto half = std::partition(begin, end, [origin, kRadius](const MinimalPt& p){return p.DistSq(origin) < sqr(kRadius);});
-      kids.emplace_back(origin, kRadius, begin, half);
-      begin = half;
-    }
-  }
-
-  VPTree(const VPTree&) = delete;
-
-  ~VPTree()
-  {
-  }
-
-  std::vector<VPLeaf> kids;
 };
 
 class QuadTree
@@ -383,8 +307,7 @@ public:
        const UnitVec& _perp) :
     pts(_pts),
     npts(_pts.size()),
-    dir(_dir), perp(_perp),
-    vptree(_pts.begin(), _pts.end())
+    dir(_dir), perp(_perp)
   {
   }
 
@@ -392,14 +315,7 @@ public:
   unsigned int npts;
 
   UnitVec dir, perp;
-
-  VPTree vptree;
 };
-
-
-
-
-
 
 
 // ---------------------------------------------------------------------------
@@ -449,490 +365,14 @@ int CountClosePointsBulk(const std::vector<MinimalPt>& pts,
 // ---------------------------------------------------------------------------
 int CountClosePoints(const View& view, const Ray& line) throw()
 {
-  //  int ret = 0;
-
-  // Inititialize a lot of constants we can hoist out of the loop
-  //  const UnitVec bd = line.Dir().Cross(view.dir);
-
-  //  MyVec n2 = view.dir.Cross(bd);
-  //  n2 *= 1./line.Dir().Dot(n2);
-
-  /*
-  const MyVec r0 = line.Origin();
-  const MyVec r1 = line.Origin() + 10*line.Dir();
-
-  const double x0 = r0.x;
-  const double x1 = r1.x;
-  const double z0 = r0.Dot(view.perp);
-  const double z1 = r1.Dot(view.perp);
-
-  const double m2 = (z1-z0)/(x1-x0);
-  const double c2 = z0-m2*x0;
-  */
-
   // dz/dx
   const float m = line.Dir().Dot(view.perp) / line.Dir().X();
 
   // z(x=0)
   const float c = line.Origin().Dot(view.perp) - m * line.Origin().x;
 
-  //  std::cout << "  m1 c1 " << m << " " << c << " " << m2 << " " << c2 << std::endl;
-
   MinimalLine ml(m, c);
   return CountClosePoints(view.pts, ml);
-
-  /*
-  const float angleFactor = sqrt(1+sqr(m));
-  const float maxdz = maxd * angleFactor;
-
-  //  const float lambda0 = line.Origin().Dot(n2);
-
-  //  const float lambdax = n2.x;
-  //  const float lambdaz = view.perp.Y()*n2.y + view.perp.Z()*n2.z;
-
-  // This is all extremely hot and worth closely optimizing
-  for(const VPLeaf& leaf: view.vptree.kids){
-    const float dzo = fabs(m*leaf.origin.x + c - leaf.origin.z);
-
-    // If the line misses the circle plus maxd padding then we can dismiss
-    // all the children.
-    if(dzo > (leaf.radius+maxd) * angleFactor) continue;
-
-    for(const MinimalPt& p: leaf.pts){
-      // Surprisingly fabs() here is substantially faster than sqr()
-      const float dz = fabs(m*p.x + c - p.z);
-      if(dz < maxdz){
-        ++ret;
-        //        const float lambda = p.x * lambdax + p.z * lambdaz - lambda0;
-        //        Ls.emplace_back(lambda, v);
-      }
-    } // end for p
-  } // end for leaf
-
-  return ret;
-  */
-}
-
-
-// ---------------------------------------------------------------------------
-int LongestChainCount(const std::array<View, 3>& views,
-                      const Ray& line,
-                      unsigned int target,
-                      std::vector<int> viewIdxs = {0, 1, 2}) throw()
-{
-  static std::vector<std::pair<float, int>> Ls;
-  Ls.clear(); // try to avoid frequent re-allocation
-
-  for(int v: viewIdxs){
-    const View& view = views[v];
-
-    // Inititialize a lot of constants we can hoist out of the loop
-    const UnitVec bd = line.Dir().Cross(view.dir);
-
-    MyVec n2 = view.dir.Cross(bd);
-    n2 *= 1./line.Dir().Dot(n2);
-
-    // dz/dx
-    const float m = line.Dir().Dot(view.perp) / line.Dir().X();
-
-    // z(x=0)
-    const float c = line.Origin().Dot(view.perp) - line.Origin().x / line.Dir().X() * line.Dir().Dot(view.perp);
-
-    const float angleFactor = sqrt(1+sqr(m));
-    const float maxdz = maxd * angleFactor;
-
-    const float lambda0 = line.Origin().Dot(n2);
-
-    const float lambdax = n2.x;
-    const float lambdaz = view.perp.Y()*n2.y + view.perp.Z()*n2.z;
-
-    // This is all extremely hot and worth closely optimizing
-    for(const VPLeaf& leaf: view.vptree.kids){
-      const float dzo = fabs(m*leaf.origin.x + c - leaf.origin.z);
-
-      // If the line misses the circle plus maxd padding then we can dismiss
-      // all the children.
-      if(dzo > (leaf.radius+maxd) * angleFactor) continue;
-
-      for(const MinimalPt& p: leaf.pts){
-        // Surprisingly fabs() here is substantially faster than sqr()
-        const float dz = fabs(m*p.x + c - p.z);
-        if(dz < maxdz){
-          const float lambda = p.x * lambdax + p.z * lambdaz - lambda0;
-          Ls.emplace_back(lambda, v);
-        }
-      } // end for p
-    } // end for leaf
-  } // end for v
-
-  if(Ls.size() <= target) return -1;
-
-  // Must have at least two hits in each view
-  int nv[3] = {0, 0, 0};
-  for(auto L: Ls) ++nv[L.second];
-  for(int v: viewIdxs) if(nv[v] < 2) return -1;
-
-  std::array<int, 3> nvcur = {0, 0, 0};
-  std::array<int, 3> nvlong = {0, 0, 0};
-
-  std::sort(Ls.begin(), Ls.end());
-
-  float prevL[3] = {-1e10, -1e10, -1e10};
-
-  // The longest run found so far
-  int longest = 0;
-  int current = 0;
-
-  for(auto it = Ls.begin(); it != Ls.end(); ++it){
-    const float L = it->first;
-
-    bool gap = false;
-    for(int v: viewIdxs) gap = gap || (L - prevL[v] > maxdL);
-
-    // Gap in any one view is big enough to end segment
-    if(gap){
-      // Begin a new segment
-      current = 0;
-      nvcur = {0, 0, 0};
-      for(int v = 0; v < 3; ++v) prevL[v] = L;
-
-      // The remaining hits will be insufficient to beat the record
-      if(Ls.end()-it < longest) break;
-    }
-
-    ++current;
-    ++nvcur[it->second];
-    if(current > longest){
-      longest = current;
-      nvlong = nvcur;
-    }
-    prevL[it->second] = L;
-  } // end for (L, view)
-
-  // Must still have at least two hits in each view
-  for(int v: viewIdxs) if(nvlong[v] < 2) return -1;
-
-  return longest;
-}
-
-// ---------------------------------------------------------------------------
-// Reorders the chain to have the longest chain found at the end,
-// and updates 'begin' to point at the start of that chain
-int LongestChainApply(std::vector<BPPt>::iterator& begin,
-                      const std::vector<BPPt>::iterator end,
-                      const Ray& line, unsigned int target)
-{
-  // The longest run found so far
-  static std::vector<std::vector<BPPt>::iterator> longest, current;
-  static std::vector<std::pair<float, std::vector<BPPt>::iterator>> Ls;
-  longest.clear();
-  current.clear();
-  Ls.clear(); // try to avoid frequent re-allocation
-
-  for(auto it = begin; it != end; ++it){
-    if(line.SqrDistanceToRay(it->ray) < maxdsq){
-      const float distAlong = line.ClosestLambdaToRay(it->ray);
-      Ls.emplace_back(distAlong, it);
-    }
-  }
-
-  if(Ls.size() < target) return -1;
-
-  std::sort(Ls.begin(), Ls.end());
-
-  float prevL[3] = {-std::numeric_limits<float>::max(),
-                    -std::numeric_limits<float>::max(),
-                    -std::numeric_limits<float>::max()};
-
-  for(auto it: Ls){
-    const float L = it.first;
-
-    bool gap = false;
-    for(int v = 0; v < 3; ++v) gap = gap || (L - prevL[v] > maxdL);
-
-    // Gap in any one view is big enough to end segment
-    if(gap){
-      // Begin a new segment
-      current.clear();
-      for(int v = 0; v < 3; ++v) prevL[v] = L;
-    }
-
-    current.push_back(it.second);
-    if(current.size() > longest.size()) longest = current;
-    prevL[it.second->view] = L;
-  } // end for (L, view)
-
-  if(current.size() > longest.size()) longest = current;
-
-  if(longest.size() < target) return -1;
-
-  // Mark all the points on the longest run we found
-  for(auto it: longest) it->priv = 1;
-
-  // Move all the ones we've marked to the end
-  begin = std::partition(begin, end, [](const BPPt& p){return p.priv == 0;});
-
-  // Reset the flag
-  for(auto it = begin; it != end; ++it) it->priv = 0;
-
-  return longest.size();
-}
-
-// ---------------------------------------------------------------------------
-void RandomPairs(std::vector<BPPt>::iterator begin,
-                 std::vector<BPPt>::iterator end,
-                 FastRand& r,
-                 std::vector<std::pair<BPPt, BPPt>>& ret)
-{
-  const int kMaxPairs = 10000;
-
-  ret.clear();
-  ret.reserve(kMaxPairs);
-
-  if(((end-begin)*(end-begin-1))/2 <= kMaxPairs){
-    //    std::cout << "Deterministic pairs!" << std::endl;
-    for(auto it = begin; it != end; ++it){
-      for(auto it2 = it+1; it2 != end; ++it2){
-        ret.emplace_back(*it, *it2);
-      }
-    }
-  }
-  else{
-    for(int trial = 0; trial < kMaxPairs; ++trial){
-      ret.emplace_back(*(begin + r.xorshift32()%(end-begin)),
-                       *(begin + r.xorshift32()%(end-begin)));
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-void RandomQuads(int N,
-                 std::vector<BPPt>::iterator begin,
-                 std::vector<BPPt>::iterator end,
-                 FastRand& r,
-                 std::vector<std::array<BPPt, 4>>& ret)
-{
-  ret.clear();
-  ret.reserve(N);
-
-  if((double(end-begin)*double(end-begin-1)*double(end-begin-2)*double(end-begin-3))/24 <= N){
-    std::cout << "Deterministic quads!!!" << std::endl;
-    for(auto it = begin; it != end; ++it){
-      for(auto it2 = it+1; it2 != end; ++it2){
-        for(auto it3 = it2+1; it3 != end; ++it3){
-          for(auto it4 = it3+1; it4 != end; ++it4){
-            ret.push_back({*it, *it2, *it3, *it4});
-          }
-        }
-      }
-    }
-  }
-  else{
-    for(int trial = 0; trial < N; ++trial){
-      ret.push_back({*(begin + r.xorshift32()%(end-begin)),
-                     *(begin + r.xorshift32()%(end-begin)),
-                     *(begin + r.xorshift32()%(end-begin)),
-                     *(begin + r.xorshift32()%(end-begin))});
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-void CandidateLinesRandom(int N,
-                          std::vector<BPPt>::iterator begin,
-                          std::vector<BPPt>::iterator end,
-                          const std::array<View, 3>& views,
-                          FastRand& r,
-                          std::vector<std::pair<Ray, int>>& lines)
-{
-  std::vector<std::array<BPPt, 4>> quads;
-  RandomQuads(N, begin, end, r, quads);
-
-  for(auto seed: quads){
-    // Avoid cases that give a degenerate solution
-    bool ok = true;
-    for(int i = 0; i < 3; ++i)
-      for(int j = i+1; j < 4; ++j)
-        if(seed[i].ray.Origin().x == seed[j].ray.Origin().x &&
-           seed[i].view == seed[j].view) ok = false;
-    if(!ok) continue;
-
-    // 2+2+0 or 2+1+1 is OK, 3/4+anything is not
-    int nperview[3] = {0, 0, 0};
-    for(const BPPt& s: seed) ++nperview[s.view];
-    for(int v = 0; v < 3; ++v) if(nperview[v] >= 3) ok = false;
-    if(!ok) continue;
-
-    const Ray line = PointsToRay(seed);
-
-    // Very horizontal lines can cause problems
-    if(sqr(line.Dir().X()) < 1e-10*(sqr(line.Dir().Y() + line.Dir().Z()))) continue;
-
-
-    const int nmatch = LongestChainCount(views, line, kMinMatch-1);
-
-    if(nmatch >= kMinMatch) lines.emplace_back(line, nmatch);
-  } // end for trial
-}
-
-// ---------------------------------------------------------------------------
-void CandidateLinesGreedy(std::vector<BPPt>::iterator begin,
-                          std::vector<BPPt>::iterator end,
-                          const std::array<View, 3>& views,
-                          FastRand& r,
-                          std::vector<std::pair<Ray, int>>& lines)
-{
-  std::array<BPPt, 4> bests = {*begin, *begin, *begin, *begin};
-
-  int bestScore3D = kMinMatch-1;
-
-  for(int view = 0; view < 3; ++view){
-    auto view_end = std::partition(begin, end, [view](const BPPt& p){return p.view == view;});
-
-    int bestScore2D = 0;
-    BPPt bestA = *begin;
-    BPPt bestB = *begin;
-
-    std::vector<std::pair<BPPt, BPPt>> pairs;
-    RandomPairs(begin, view_end, r, pairs);
-
-    for(auto& it: pairs){
-      const BPPt a = it.first;
-      const BPPt b = it.second;
-
-      if(a.ray.Origin().x == b.ray.Origin().x) continue;
-
-      const Ray line2D(a.ray.Origin(), b.ray.Origin() - a.ray.Origin());
-
-      const int score = LongestChainCount(views, line2D, bestScore2D, {view});
-      if(score > bestScore2D){
-        bestScore2D = score;
-        bestA = a;
-        bestB = b;
-      }
-    }
-
-    // TODO - possible/worthwhile to scan optimize the endpoints in 2D first?
-
-    RandomPairs(view_end, end, r, pairs);
-
-    BPPt bestC = *view_end;
-    BPPt bestD = *view_end;
-
-    for(auto& it: pairs){
-      const BPPt c = it.first;
-      const BPPt d = it.second;
-      if(c.view == d.view && c.ray.Origin().x == d.ray.Origin().x) continue;
-
-      const Ray line3D = PointsToRay({bestA, bestB, c, d});
-
-      // Very horizontal lines can cause problems
-      if(sqr(line3D.Dir().X()) < 1e-10*(sqr(line3D.Dir().Y() + line3D.Dir().Z()))) continue;
-
-      const int score = LongestChainCount(views, line3D, bestScore3D);
-      if(score > bestScore3D){
-        bestScore3D = score;
-        bestC = c;
-        bestD = d;
-        bests = {bestA, bestB, bestC, bestD};
-      }
-    }
-  } // end for view
-
-  /*
-  std::cout << bestScore3D << " -> ";
-
-  while(true){
-    bool any = false;
-    for(int i = 0; i < 4; ++i){
-      for(auto it = begin; it != end; ++it){
-        auto maybe = bests;
-        maybe[i] = *it;
-
-        // Avoid cases that give a degenerate solution
-        bool ok = true;
-        for(int i = 0; i < 3; ++i)
-          for(int j = i+1; j < 4; ++j)
-            if(maybe[i].ray.Origin().x == maybe[j].ray.Origin().x &&
-               maybe[i].view == maybe[j].view) ok = false;
-        if(!ok) continue;
-
-        // 2+2+0 or 2+1+1 is OK, 3/4+anything is not
-        int nperview[3] = {0, 0, 0};
-        for(BPPt& s: maybe) ++nperview[s.view];
-        for(int v = 0; v < 3; ++v) if(nperview[v] >= 3) ok = false;
-        if(!ok) continue;
-
-        const Ray line3D = PointsToRay(maybe);
-
-        // Very horizontal lines can cause problems
-        if(sqr(line3D.Dir().X()) < 1e-10*(sqr(line3D.Dir().Y() + line3D.Dir().Z()))) continue;
-
-        const int score = LongestChainCount(views, line3D, bestScore3D);
-        if(score > bestScore3D){
-          any = true;
-          bestScore3D = score;
-          bests = maybe;
-        }
-      }
-    }
-    if(!any) break;
-  }
-
-  std::cout << bestScore3D << " after opt" << std::endl;
-  */
-
-  if(bestScore3D >= kMinMatch)
-    lines.emplace_back(PointsToRay(bests), bestScore3D);
-}
-
-// ---------------------------------------------------------------------------
-void CandidateLinesSeedsIncremental(const std::vector<MyVec>& seeds,
-                                    const std::array<View, 3>& views,
-                                    std::vector<std::pair<Ray, int>>& lines)
-{
-  // Must use one of the two new endpoints, but not both
-  for(unsigned int i = seeds.size()-2; i < seeds.size(); ++i){
-    for(unsigned int j = 0; j < seeds.size()-2; ++j){
-      const Ray line3D(seeds[i], seeds[j]-seeds[i]);
-
-      const int score = LongestChainCount(views, line3D, kMinMatch);
-
-      if(score >= kMinMatch){
-        lines.emplace_back(line3D, score);
-      }
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-void AddArtTrack(const Ray& line,
-                 std::vector<BPPt>::iterator begin,
-                 std::vector<BPPt>::iterator end,
-                 MyVec r0, MyVec r1,
-                 std::vector<recob::Track>* trkcol,
-                 art::Assns<recob::Track, recob::Hit>* assns,
-                 const art::Event& evt,
-                 const art::Handle<std::vector<recob::Hit>>& hits)
-{
-  // Magic up a pointer to the track we're about to make
-  const art::ProductID id = evt.getProductID<std::vector<recob::Track>>("");
-  const art::EDProductGetter* pg = evt.productGetter(id);
-  const art::Ptr<recob::Track> ptrk(id, trkcol->size(), pg);
-
-  for(auto it = begin; it != end; ++it)
-    assns->addSingle(ptrk, art::Ptr<recob::Hit>(hits, it->hitIdx));
-
-  std::vector<geo::Point_t> tps;
-  tps.emplace_back(r0.x, r0.y, r0.z);
-  tps.emplace_back(r1.x, r1.y, r1.z);
-
-  const recob::TrackTrajectory traj(std::move(tps),
-                                    std::vector<geo::Vector_t>(tps.size()), // momenta
-                                    std::vector<recob::TrajectoryPointFlags>(tps.size()),
-                                    false);
-
-  trkcol->emplace_back(traj, 0, 0, 0, recob::Track::SMatrixSym55(), recob::Track::SMatrixSym55(), trkcol->size()+1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1165,23 +605,8 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
                                   ptsB[resB.hitA], ptsB[resB.hitB]);
 
       const Score score3d = CountLongestGoodSubset(ray, ExtractClosePointsCopy(ray, pts_by_view));
-      /*
-      const int scoreC = CountClosePoints(views[viewC], ray);
-      const int totScore = resA.score + resB.score + scoreC;
-      const int minScore = std::min(std::min(resA.score, resB.score), scoreC);
 
-
-      if(minScore > bestMinScore ||
-         (minScore == bestMinScore && totScore > bestTotScore)){
-
-
-        std::cout << "*** new best score " << minScore << std::endl;
-        std::cout << "  " << resA.score << " + " << resB.score << " + " << scoreC << std::endl;
-        bestMinScore = minScore;
-        bestTotScore = totScore;
-      */
-
-      if(score3d > bestScore){//bestMinScore){
+      if(score3d > bestScore){
         std::cout << "*** new best score " << score3d << std::endl;
 
         bestScore = score3d;
@@ -1298,13 +723,13 @@ bool ProjectPoint(const std::vector<FinalTrack>& trks, const BPPt& pt,
 }
 
 // ---------------------------------------------------------------------------
-void AddArtTrack2(const FinalTrack& trk,
-                  //                 std::vector<BPPt>::iterator begin,
-                  //                 std::vector<BPPt>::iterator end,
-                  std::vector<recob::Track>* trkcol,
-                  art::Assns<recob::Track, recob::Hit>* assns,
-                  const art::Event& evt,
-                  const art::Handle<std::vector<recob::Hit>>& hits)
+void AddArtTrack(const FinalTrack& trk,
+                 //                 std::vector<BPPt>::iterator begin,
+                 //                 std::vector<BPPt>::iterator end,
+                 std::vector<recob::Track>* trkcol,
+                 art::Assns<recob::Track, recob::Hit>* assns,
+                 const art::Event& evt,
+                 const art::Handle<std::vector<recob::Hit>>& hits)
 {
   // Magic up a pointer to the track we're about to make
   const art::ProductID id = evt.getProductID<std::vector<recob::Track>>("");
@@ -1417,7 +842,7 @@ void QuadPts::produce(art::Event& evt)
   } // end for itrk
 
   for(const FinalTrack& t: finals){
-    AddArtTrack2(t, trkcol.get(), assns.get(), evt, hits);
+    AddArtTrack(t, trkcol.get(), assns.get(), evt, hits);
   }
 
   for(const BPPt& pt: pts3d_all){
