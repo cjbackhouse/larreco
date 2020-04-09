@@ -324,22 +324,58 @@ int CountClosePoints(const std::vector<MinimalPt>& pts,
 {
   int ret = 0;
 
-  const float angleFactor = sqrt(1+sqr(line.dzdx));
-  const float maxdz = maxd * angleFactor;
+  const float angleFactor = 1+sqr(line.dzdx);
+  const float maxdzsq = maxdsq * angleFactor;
 
   for(const MinimalPt& p: pts){
-    // Surprisingly fabs() here is substantially faster than sqr()
-    const float dz = fabs(line.dzdx*p.x + line.z0 - p.z);
+    const float dzsq = sqr(line.dzdx*p.x + line.z0 - p.z);
 
-    // Hmm, seems not really
-    //      const float dz2 = sqr(line.dzdx*p.x + line.z0 - p.z);
-
-    if(dz < maxdz) ret += 2-p.nTrk;
+    if(dzsq < maxdzsq) ret += 2-p.nTrk;
   } // end for p
 
   return ret;
 }
 
+typedef float v4f __attribute__ ((vector_size (16)));
+typedef int   v4i __attribute__ ((vector_size (16)));
+
+// ---------------------------------------------------------------------------
+int CountClosePoints_vec(const std::vector<MinimalPt>& pts,
+                         const MinimalLine& line) throw()
+{
+  // NB putting a const on any of these variables seems to mis-compile(!)
+
+  v4i rets = {0, 0, 0, 0};
+
+  const float angleFactor = 1+sqr(line.dzdx);
+  const float maxdzsq = maxdsq * angleFactor;
+
+  const unsigned int N = pts.size();
+  //  std::cout << N << std::endl;
+  for(unsigned int i = 0; i+3 < N; i += 4){
+    v4f zs = {pts[i].z, pts[i+1].z, pts[i+2].z, pts[i+3].z};
+    v4f xs = {pts[i].x, pts[i+1].x, pts[i+2].x, pts[i+3].x};
+    v4i nTrks = {pts[i].nTrk, pts[i+1].nTrk, pts[i+2].nTrk, pts[i+3].nTrk};
+
+    v4f dzsqs = sqr(line.dzdx*xs + line.z0 - zs);
+
+    rets += (dzsqs < maxdzsq) ? 2-nTrks : 0;
+  } // end for p
+
+  // TODO extra loop to mop up the last up-to-three points
+
+  const int sumret = rets[0]+rets[1]+rets[2]+rets[3];
+
+  /*
+  const int truth = CountClosePoints(pts, line);
+  if(sumret > truth || sumret+6 < truth){
+    std::cout << sumret << " vs " << truth << std::endl;
+    abort();
+  }
+  */
+
+  return sumret;
+}
 
 // ---------------------------------------------------------------------------
 int CountClosePointsBulk(const std::vector<MinimalPt>& pts,
@@ -373,7 +409,7 @@ int CountClosePoints(const View& view, const Ray& line) throw()
   const float c = line.Origin().Dot(view.perp) - m * line.Origin().x;
 
   MinimalLine ml(m, c);
-  return CountClosePoints(view.pts, ml);
+  return CountClosePoints_vec(view.pts, ml);
 }
 
 // ---------------------------------------------------------------------------
@@ -636,7 +672,7 @@ Ray BestRay(const std::array<View, 3>& views,
         const MinimalPt mptA1 = views[viewA].pts[iA1];
         const MinimalPt mptA2 = views[viewA].pts[iA2];
 
-        int nA = CountClosePoints(views[viewA].pts, MinimalLine(mptA1, mptA2));
+        int nA = CountClosePoints_vec(views[viewA].pts, MinimalLine(mptA1, mptA2));
         cache[viewA][iA1][iA2] = nA;
         if(nA < bestScore.GetMin()) continue;
       }
@@ -645,7 +681,7 @@ Ray BestRay(const std::array<View, 3>& views,
         const MinimalPt mptB1 = views[viewB].pts[iB1];
         const MinimalPt mptB2 = views[viewB].pts[iB2];
 
-        int nB = CountClosePoints(views[viewB].pts, MinimalLine(mptB1, mptB2));
+        int nB = CountClosePoints_vec(views[viewB].pts, MinimalLine(mptB1, mptB2));
         cache[viewB][iB1][iB2] = nB;
         if(nB < bestScore.GetMin()) continue;
       }
