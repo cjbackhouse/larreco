@@ -319,7 +319,8 @@ public:
 
 
 // ---------------------------------------------------------------------------
-int CountClosePoints(const std::vector<MinimalPt>& pts, const MinimalLine& line) throw()
+int CountClosePoints(const std::vector<MinimalPt>& pts,
+                     const MinimalLine& line) throw()
 {
   int ret = 0;
 
@@ -392,7 +393,7 @@ void PopulateResultsTable(const std::array<std::vector<MinimalPt>, 3>& mpts,
     const std::vector<MinimalPt>& mptsv = mpts[view];
     const unsigned int N = mptsv.size();
     std::vector<Result>& local_results = results[view];
-    local_results.reserve((N*(N+1))/2);
+    local_results.reserve((N*(N-1))/2);
 
     for(unsigned int i = 0; i < N; ++i){
       for(unsigned int j = i+1; j < N; ++j){
@@ -402,6 +403,8 @@ void PopulateResultsTable(const std::array<std::vector<MinimalPt>, 3>& mpts,
         local_results.emplace_back(score, i, j);
       } // end for j
     } // end for i
+
+    std::cout << view << " " << mpts[view].size() << " " << local_results.size() << std::endl;
 
     // Needs to be sorted so we can safely reject those that can't reach target
     std::sort(local_results.rbegin(), local_results.rend());
@@ -488,6 +491,8 @@ Score LongestGoodSubsetHelper(const Ray& ray, const std::vector<BPPt>& pts,
                               std::vector<BPPt>* trk_pts,
                               std::vector<BPPt>* reject_pts)
 {
+  if(pts.empty()) return Score();
+
   static std::vector<const BPPt*> ppts;
   ppts.clear();
   for(const BPPt& pt: pts){
@@ -566,9 +571,18 @@ Score CountLongestGoodSubset(const Ray& ray, const std::vector<BPPt>& pts)
 }
 
 // ---------------------------------------------------------------------------
-// NB mutates results
-Ray BestRay(std::array<std::vector<Result>, 3>& results,
-            const std::array<View, 3>& views,
+void RandomIndices(FastRand& r, int N, int& i1, int& i2)
+{
+  do{
+    i1 = r.xorshift32()%N;
+    i2 = r.xorshift32()%N;
+  } while(i1 == i2);
+
+  if(i1 > i2) std::swap(i1, i2);
+}
+
+// ---------------------------------------------------------------------------
+Ray BestRay(const std::array<View, 3>& views,
             const std::array<std::vector<BPPt>, 3>& pts_by_view)
 {
   Score bestScore;
@@ -578,6 +592,15 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
 
   // All the ways to have 2 views (order doesn't matter) and then the third (special) view
   const int viewIdxs[3][3] = {{0, 1, 2}, {0, 2, 1}, {1, 2, 0}};
+
+  // TODO this could be a more efficient structure, but doesn't seem to cost
+  // much
+  std::array<std::vector<std::vector<int>>, 3> cache;
+  for(int view = 0; view < 3; ++view){
+    const unsigned int N = pts_by_view[view].size();
+    cache[view].resize(N);
+    for(unsigned int i = 0; i < N; ++i) cache[view][i].resize(N);
+  }
 
   int nAttempts = 0;
   int lastProg = -1;
@@ -593,18 +616,47 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
       const std::vector<BPPt>& ptsA = pts_by_view[viewA];
       const std::vector<BPPt>& ptsB = pts_by_view[viewB];
 
-      if(results[viewA].empty() || results[viewB].empty()) return bestRay;
+      if(ptsA.empty() || ptsB.empty()) return bestRay;
 
-      const Result resA = results[viewA][r.xorshift32()%results[viewA].size()];
-      const Result resB = results[viewB][r.xorshift32()%results[viewB].size()];
+      int iA1, iA2, iB1, iB2;
+      RandomIndices(r, ptsA.size(), iA1, iA2);
+      RandomIndices(r, ptsB.size(), iB1, iB2);
 
-      if(resA.score+resB.score+results[viewC].front().score <= bestScore.GetTot()){
-        //        std::cout << "Skipping on the basis of Tot score" << std::endl;
-        continue;
+      int nA = cache[viewA][iA1][iA2];
+      int nB = cache[viewB][iB1][iB2];
+      // already evaluated this 3D line
+      if(nA > 0 && nB > 0) continue;
+
+      // Guaranteed to be worse than current best
+      if(nA > 0 && nA < bestScore.GetMin()) continue;
+      if(nB > 0 && nB < bestScore.GetMin()) continue;
+
+      // Evaluate and compare to current best
+      if(nA == 0){
+        const MinimalPt mptA1 = views[viewA].pts[iA1];
+        const MinimalPt mptA2 = views[viewA].pts[iA2];
+
+        int nA = CountClosePoints(views[viewA].pts, MinimalLine(mptA1, mptA2));
+        cache[viewA][iA1][iA2] = nA;
+        if(nA < bestScore.GetMin()) continue;
       }
 
-      const Ray ray = PointsToRay(ptsA[resA.hitA], ptsA[resA.hitB],
-                                  ptsB[resB.hitA], ptsB[resB.hitB]);
+      if(nB == 0){
+        const MinimalPt mptB1 = views[viewB].pts[iB1];
+        const MinimalPt mptB2 = views[viewB].pts[iB2];
+
+        int nB = CountClosePoints(views[viewB].pts, MinimalLine(mptB1, mptB2));
+        cache[viewB][iB1][iB2] = nB;
+        if(nB < bestScore.GetMin()) continue;
+      }
+
+      const Ray ray = PointsToRay(ptsA[iA1], ptsA[iA2], ptsB[iB1], ptsB[iB2]);
+
+      // Would third view fall below limit?
+      const int nC = CountClosePoints(views[viewC], ray);
+      if(nC < bestScore.GetMin()) continue;
+      // TODO is it worthwhile reusing any of the info from these calls for
+      // ExtractClosePoints?
 
       const Score score3d = CountLongestGoodSubset(ray, ExtractClosePointsCopy(ray, pts_by_view));
 
@@ -616,21 +668,6 @@ Ray BestRay(std::array<std::vector<Result>, 3>& results,
         bestScore = score3d;
 
         bestRay = ray;
-
-        // TODO figure out how to do this with lower_bound et al
-        for(int view = 0; view < 3; ++view){
-          while(!results[view].empty() && results[view].back().score < bestScore.GetMin()) results[view].pop_back();
-          if(results[view].empty()) return bestRay;
-        }
-
-        std::cout << " now " << results[viewA].size() << " " << results[viewB].size() << " " << results[viewC].size() << std::endl;
-        // TODO potentially exhaustive search once the product of the two smallest is minimized
-
-
-        if(results[0][0].score + results[1][0].score + results[2][0].score <= bestScore.GetTot()){
-          std::cout << "We have found the guaranteed best score - break" << std::endl;
-          return bestRay;
-        }
       }
       else{
         if(nAttempts%10000 == 0) std::cout << "Attempts / last: " << nAttempts << " " << lastProg << std::endl;
@@ -806,11 +843,7 @@ void QuadPts::produce(art::Event& evt)
                                        View(mpts[1], dirs[1], perps[1]),
                                        View(mpts[2], dirs[2], perps[2])};
 
-    std::array<std::vector<Result>, 3> results;
-    PopulateResultsTable(mpts, results);
-    if(results[0].empty() || results[1].empty() || results[2].empty()) break;
-
-    const Ray bestRay = BestRay(results, views, pts_by_view);
+    const Ray bestRay = BestRay(views, pts_by_view);
 
     std::vector<BPPt> trkpts = ExtractClosePoints(bestRay, pts3d);
     std::cout << "Found " << trkpts.size() << " 3D points close to track" << std::endl;
