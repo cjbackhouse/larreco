@@ -341,7 +341,10 @@ typedef int   v4i __attribute__ ((vector_size (16)));
 
 // ---------------------------------------------------------------------------
 int CountClosePoints_vec(const std::vector<MinimalPt>& pts,
-                         const MinimalLine& line) throw()
+                         const MinimalLine& line,
+                         const v4f* __restrict__ z_arr,
+                         const v4f* __restrict__ x_arr,
+                         const v4i* __restrict__ n_arr) throw()
 {
   // NB putting a const on any of these variables seems to mis-compile(!)
 
@@ -350,29 +353,19 @@ int CountClosePoints_vec(const std::vector<MinimalPt>& pts,
   const float angleFactor = 1+sqr(line.dzdx);
   const float maxdzsq = maxdsq * angleFactor;
 
-  const unsigned int N = pts.size();
-  //  std::cout << N << std::endl;
-  for(unsigned int i = 0; i+3 < N; i += 4){
-    v4f zs = {pts[i].z, pts[i+1].z, pts[i+2].z, pts[i+3].z};
-    v4f xs = {pts[i].x, pts[i+1].x, pts[i+2].x, pts[i+3].x};
-    v4i nTrks = {pts[i].nTrk, pts[i+1].nTrk, pts[i+2].nTrk, pts[i+3].nTrk};
+  const unsigned int N = (pts.size()+3)/4; // round up
+
+  for(unsigned int i = 0; i < N; ++i){
+    v4f zs = z_arr[i];
+    v4f xs = x_arr[i];
+    v4i ns = n_arr[i];
 
     v4f dzsqs = sqr(line.dzdx*xs + line.z0 - zs);
 
-    rets += (dzsqs < maxdzsq) ? 2-nTrks : 0;
-  } // end for p
-
-  // TODO extra loop to mop up the last up-to-three points
+    rets += (dzsqs < maxdzsq) ? ns : 0;
+  } // end for i
 
   const int sumret = rets[0]+rets[1]+rets[2]+rets[3];
-
-  /*
-  const int truth = CountClosePoints(pts, line);
-  if(sumret > truth || sumret+6 < truth){
-    std::cout << sumret << " vs " << truth << std::endl;
-    abort();
-  }
-  */
 
   return sumret;
 }
@@ -400,7 +393,10 @@ int CountClosePointsBulk(const std::vector<MinimalPt>& pts,
 
 
 // ---------------------------------------------------------------------------
-int CountClosePoints(const View& view, const Ray& line) throw()
+int CountClosePoints(const View& view, const Ray& line,
+                     const v4f* z_arr,
+                     const v4f* x_arr,
+                     const v4i* n_arr) throw()
 {
   // dz/dx
   const float m = line.Dir().Dot(view.perp) / line.Dir().X();
@@ -409,7 +405,7 @@ int CountClosePoints(const View& view, const Ray& line) throw()
   const float c = line.Origin().Dot(view.perp) - m * line.Origin().x;
 
   MinimalLine ml(m, c);
-  return CountClosePoints_vec(view.pts, ml);
+  return CountClosePoints_vec(view.pts, ml, z_arr, x_arr, n_arr);
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +637,29 @@ Ray BestRay(const std::array<View, 3>& views,
   int nAttempts = 0;
   int lastProg = -1;
 
+  static std::array<std::vector<v4f>, 3> z_arr, x_arr;
+  static std::array<std::vector<v4i>, 3> n_arr;
+
+  for(int v = 0; v < 3; ++v){
+    const std::vector<MinimalPt>& pts = views[v].pts;
+    const unsigned int N = pts.size();
+    const unsigned int N2 = ((N+3)/4); // round up
+
+    z_arr[v].resize(N2);
+    x_arr[v].resize(N2);
+    n_arr[v].resize(N2);
+
+    for(unsigned int i = 0; i < N; ++i){
+      z_arr[v][i/4][i%4] = pts[i].z;
+      x_arr[v][i/4][i%4] = pts[i].x;
+      n_arr[v][i/4][i%4] = 2 - pts[i].nTrk;
+    }
+    for(unsigned int i = N; i < N2*4; ++i){
+      n_arr[v][i/4][i%4] = 0; // max out nTrks -> zero value for spurious pts
+    }
+  }
+
+
   while(nAttempts < std::max(10*1000, 3*lastProg)){
     for(int vi = 0; vi < 3; ++vi){
       ++nAttempts;
@@ -672,7 +691,7 @@ Ray BestRay(const std::array<View, 3>& views,
         const MinimalPt mptA1 = views[viewA].pts[iA1];
         const MinimalPt mptA2 = views[viewA].pts[iA2];
 
-        int nA = CountClosePoints_vec(views[viewA].pts, MinimalLine(mptA1, mptA2));
+        int nA = CountClosePoints_vec(views[viewA].pts, MinimalLine(mptA1, mptA2), &z_arr[viewA][0], &x_arr[viewA][0], &n_arr[viewA][0]);
         cache[viewA][iA1][iA2] = nA;
         if(nA < bestScore.GetMin()) continue;
       }
@@ -681,7 +700,7 @@ Ray BestRay(const std::array<View, 3>& views,
         const MinimalPt mptB1 = views[viewB].pts[iB1];
         const MinimalPt mptB2 = views[viewB].pts[iB2];
 
-        int nB = CountClosePoints_vec(views[viewB].pts, MinimalLine(mptB1, mptB2));
+        int nB = CountClosePoints_vec(views[viewB].pts, MinimalLine(mptB1, mptB2), &z_arr[viewB][0], &x_arr[viewB][0], &n_arr[viewB][0]);
         cache[viewB][iB1][iB2] = nB;
         if(nB < bestScore.GetMin()) continue;
       }
@@ -689,7 +708,7 @@ Ray BestRay(const std::array<View, 3>& views,
       const Ray ray = PointsToRay(ptsA[iA1], ptsA[iA2], ptsB[iB1], ptsB[iB2]);
 
       // Would third view fall below limit?
-      const int nC = CountClosePoints(views[viewC], ray);
+      const int nC = CountClosePoints(views[viewC], ray, &z_arr[viewC][0], &x_arr[viewC][0], &n_arr[viewC][0]);
       if(nC < bestScore.GetMin()) continue;
       // TODO is it worthwhile reusing any of the info from these calls for
       // ExtractClosePoints?
