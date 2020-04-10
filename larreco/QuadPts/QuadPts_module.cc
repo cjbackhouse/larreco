@@ -39,7 +39,9 @@
 
 #include "FastRand.h"
 
-template<class T> inline T sqr(T x){return x*x;}
+//template<class T> inline T sqr(T x){return x*x;}
+#define sqr(x) ((x)*(x))
+
 template<class T> inline T cube(T x){return x*x*x;}
 
 
@@ -336,8 +338,10 @@ int CountClosePoints(const std::vector<MinimalPt>& pts,
   return ret;
 }
 
-typedef float v4f __attribute__ ((vector_size (16)));
-typedef int   v4i __attribute__ ((vector_size (16)));
+const int kBlockSize = 4;
+
+typedef float v4f __attribute__ ((vector_size (kBlockSize*sizeof(float))));
+typedef int   v4i __attribute__ ((vector_size (kBlockSize*sizeof(int))));
 
 // ---------------------------------------------------------------------------
 int CountClosePoints_vec(const std::vector<MinimalPt>& pts,
@@ -348,12 +352,13 @@ int CountClosePoints_vec(const std::vector<MinimalPt>& pts,
 {
   // NB putting a const on any of these variables seems to mis-compile(!)
 
-  v4i rets = {0, 0, 0, 0};
+  v4i rets;
+  for(unsigned int i = 0; i < kBlockSize; ++i) rets[i] = 0;
 
   const float angleFactor = 1+sqr(line.dzdx);
   const float maxdzsq = maxdsq * angleFactor;
 
-  const unsigned int N = (pts.size()+3)/4; // round up
+  const unsigned int N = (pts.size()+kBlockSize-1)/kBlockSize; // round up
 
   for(unsigned int i = 0; i < N; ++i){
     v4f zs = z_arr[i];
@@ -364,8 +369,9 @@ int CountClosePoints_vec(const std::vector<MinimalPt>& pts,
 
     rets += (dzsqs < maxdzsq) ? ns : 0;
   } // end for i
-
-  const int sumret = rets[0]+rets[1]+rets[2]+rets[3];
+ 
+  int sumret = 0;
+  for(unsigned int i = 0; i < kBlockSize; ++i) sumret += rets[i];
 
   return sumret;
 }
@@ -643,19 +649,19 @@ Ray BestRay(const std::array<View, 3>& views,
   for(int v = 0; v < 3; ++v){
     const std::vector<MinimalPt>& pts = views[v].pts;
     const unsigned int N = pts.size();
-    const unsigned int N2 = ((N+3)/4); // round up
+    const unsigned int N2 = ((N+kBlockSize-1)/kBlockSize); // round up
 
     z_arr[v].resize(N2);
     x_arr[v].resize(N2);
     n_arr[v].resize(N2);
 
     for(unsigned int i = 0; i < N; ++i){
-      z_arr[v][i/4][i%4] = pts[i].z;
-      x_arr[v][i/4][i%4] = pts[i].x;
-      n_arr[v][i/4][i%4] = 2 - pts[i].nTrk;
+      z_arr[v][i/kBlockSize][i%kBlockSize] = pts[i].z;
+      x_arr[v][i/kBlockSize][i%kBlockSize] = pts[i].x;
+      n_arr[v][i/kBlockSize][i%kBlockSize] = 2 - pts[i].nTrk;
     }
-    for(unsigned int i = N; i < N2*4; ++i){
-      n_arr[v][i/4][i%4] = 0; // max out nTrks -> zero value for spurious pts
+    for(unsigned int i = N; i < N2*kBlockSize; ++i){
+      n_arr[v][i/kBlockSize][i%kBlockSize] = 0; // max out nTrks -> zero value for spurious pts
     }
   }
 
