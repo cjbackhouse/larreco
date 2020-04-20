@@ -46,7 +46,8 @@ template<class T> inline T cube(T x){return x*x*x;}
 
 
 const float maxdL = 2; // 2cm in 3D
-const float maxd = .1;//25; // 1mm laterally
+// TODO potentially different errors in space and time
+const float maxd = .1; // 1mm laterally
 const float maxdsq = sqr(maxd);
 
 const int kMinMatch = 6;//10;//20; // Don't make tracks smaller than this
@@ -495,31 +496,38 @@ public:
 
   int GetMin() const {return std::min(fVal[0], std::min(fVal[1], fVal[2]));}
   int GetTot() const {return fVal[0]+fVal[1]+fVal[2];}
+  float GetTotDist() const {return fDist[0]+fDist[1]+fDist[2];}
 
   void Increment(int idx, int delta = 1) {fVal[idx] += delta;}
-  void Reset() {fVal[0] = fVal[1] = fVal[2] = 0;}
+  void IncrementDist(int idx, float delta) {fDist[idx] += delta;}
+  void Reset() {fVal[0] = fVal[1] = fVal[2] = 0; fDist[0] = fDist[1] = fDist[2] = 0;}
 
 
   bool operator<(const Score& s) const
   {
     const int m = GetMin(), sm = s.GetMin();
     if(m != sm) return m < sm;
-    return GetTot() < s.GetTot();
+    const int t = GetTot(), st = s.GetTot();
+    if(t != st) return t < st;
+    return GetTotDist() > s.GetTotDist(); // NB large dist is bad
   }
 
   bool operator>(const Score& s) const
   {
     const int m = GetMin(), sm = s.GetMin();
     if(m != sm) return m > sm;
-    return GetTot() > s.GetTot();
+    const int t = GetTot(), st = s.GetTot();
+    if(t != st) return t > st;
+    return GetTotDist() < s.GetTotDist(); // NB large dist is bad
   }
 protected:
   std::array<int, 3> fVal;
+  std::array<float, 3> fDist;
 };
 
 std::ostream& operator<<(std::ostream& os, const Score& s)
 {
-  os << s.GetMin() << " (" << s.GetTot() << ")";
+  os << s.GetMin() << " (" << s.GetTot() << ", " << s.GetTotDist() << ")";
   return os;
 }
 
@@ -579,7 +587,12 @@ Score LongestGoodSubsetHelper(const Ray& ray, const std::vector<BPPt>& pts,
     if(it == ppts.end()) break;
 
     prevLambda[pt.view] = pt.privF;
-    if(inTrack) score.Increment(pt.view, 2-pt.nTrk);
+    if(inTrack){
+      const float dsq = pt.ray.SqrDistanceToRay(ray);
+
+      score.Increment(pt.view, 2-pt.nTrk);
+      score.IncrementDist(pt.view, (2-pt.nTrk)*dsq);
+    }
   } // end for it
 
   if(trk_pts && reject_pts){
@@ -716,6 +729,13 @@ Ray BestRay(const std::array<View, 3>& views,
       // Would third view fall below limit?
       const int nC = CountClosePoints(views[viewC], ray, &z_arr[viewC][0], &x_arr[viewC][0], &n_arr[viewC][0]);
       if(nC < bestScore.GetMin()) continue;
+
+      if(std::min(nA, std::min(nB, nC)) == bestScore.GetMin()){
+        if(nA+nB+nC < bestScore.GetTot()){
+          continue;
+        }
+      }
+
       // TODO is it worthwhile reusing any of the info from these calls for
       // ExtractClosePoints?
 
