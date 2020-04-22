@@ -44,11 +44,14 @@
 
 template<class T> inline T cube(T x){return x*x*x;}
 
+const float sigmaz = .25; // 2.5mm, inevitable due to wire spacing
+const float sigmax = .1; // 1mm
 
-const float maxdL = 2; // 2cm in 3D
-// TODO potentially different errors in space and time
-const float maxd = .1; // 1mm laterally
+const float maxd = 1; // in sigmas
 const float maxdsq = sqr(maxd);
+
+const float maxzgap = 5; // in terms of sigmaz
+
 
 const int kMinMatch = 6;//10;//20; // Don't make tracks smaller than this
 
@@ -168,140 +171,6 @@ struct MinimalLine
   float dzdx, z0;
 };
 
-class QuadTree
-{
-public:
-  const float cellSize = 64;//1; // cm
-
-  QuadTree(const std::vector<MinimalPt>& pts)
-  {
-    zoff = std::numeric_limits<float>::infinity();
-    xoff = std::numeric_limits<float>::infinity();
-
-    for(MinimalPt pt: pts){
-      zoff = std::min(zoff, pt.z);
-      xoff = std::min(xoff, pt.x);
-    }
-
-    xoff -= .5;
-    zoff -= .5;
-
-    zoff *= -1;
-    xoff *= -1;
-
-    for(MinimalPt pt: pts) Add(pt);
-  }
-
-  int Count(MinimalLine line) const throw()
-  {
-    line.z0 += zoff - xoff*line.dzdx; // correct for point offset
-
-    int stride = 512; // TODO 2^9
-
-    const float angleFactor = sqrt(1+sqr(line.dzdx));
-    const float maxdz = maxd * angleFactor;
-
-    static std::vector<int> todo, next;
-    //    todo.reserve(1024*1024);
-    //    next.reserve(1024*1024);
-    todo.clear();
-    next.clear();
-    todo.push_back(0);
-
-    for(int level = 0; level < 9/*10*/; ++level){
-      //      const float Rz = stride*cellSize/sqrt(2) * angleFactor; // cover the corners
-
-      for(int k: todo){
-        //        const float x0 = (k/1024+.5)*stride*cellSize;
-        //        const float z0 = (k%1024+.5)*stride*cellSize;
-
-        //        const float dz = fabs(line.dzdx * x0 + line.z0 - z0);
-
-        const float xlo = (k/1024  )*stride*cellSize - maxd;
-        const float xhi = (k/1024+1)*stride*cellSize + maxd;
-        const float zlo = (k%1024  )*stride*cellSize - maxd;
-        const float zhi = (k%1024+1)*stride*cellSize + maxd;
-        const float zin  = line.dzdx*xlo + line.z0;
-        const float zout = line.dzdx*xhi + line.z0;
-
-        // Intersects the (padded) box
-        if((zin > zlo || zout > zlo) && (zin < zhi || zout < zhi)){
-
-          //        if(dz < Rz + maxdz){
-          for(int dij = 0; dij < 4; ++dij){
-            const int di = dij/2;
-            const int dj = dij%2;
-            //          for(int di = 0; di <= 1; ++di){
-            //            for(int dj = 0; dj <= 1; ++dj){
-            const int key = 1024*((k/1024)*2+di) + ((k%1024)*2+dj);
-            if(fSets[level+1][key]/*.count(key)*/) next.push_back(key);
-          } // end for dij
-        } // end if
-      } // end for k (todo)
-
-      todo.swap(next);
-      next.clear();
-
-      stride /= 2;
-    } // end for level
-
-    /*
-    // Putting all the math together like this is a little faster
-    static std::vector<MinimalPt> pts;
-    pts.clear();
-    for(int k: todo){
-      const auto& fpk = fPts[k];
-      pts.insert(pts.end(), fpk.begin(), fpk.end());
-    }
-
-    int ret = 0;
-    for(MinimalPt p: pts){
-      if(fabs(line.dzdx * p.x + line.z0 - p.z) < maxdz) ++ret;
-    }
-    */
-
-    int ret = 0;
-    for(int k: todo){
-      for(MinimalPt p: fPts[k]){//fPts.find(k)->second){
-        const float dz = fabs(line.dzdx * p.x + line.z0 - p.z);
-        if(dz < maxdz) ++ret;
-      }
-    }
-
-    return ret;
-  }
-
-protected:
-  void Add(MinimalPt pt)
-  {
-    pt.z += zoff;
-    pt.x += xoff;
-
-    int stride = 1;
-
-    // True global position
-    const int i = int(pt.x/cellSize);
-    const int j = int(pt.z/cellSize);
-    fPts[1024*i+j].push_back(pt);
-
-    for(int level = 9; level >= 0; --level){
-      const int key = 1024*(i/stride) + j/stride;
-      fSets[level][key] = true;//.insert(key);
-      stride *= 2;
-    }
-  }
-
-  float zoff, xoff;
-
-  //  std::array<std::array<bool, 1024*1024>, 10> fSets;
-  std::array<std::bitset<1024*1024>, 10> fSets;
-  //  std::array<std::unordered_set<int>, 10> fSets;
-
-  //  std::unordered_map<int, std::vector<MinimalPt>> fPts;
-
-  std::array<std::vector<MinimalPt>, 1024*1024> fPts;
-};
-
 class View
 {
 public:
@@ -376,28 +245,6 @@ int CountClosePoints_vec(const std::vector<MinimalPt>& pts,
 
   return sumret;
 }
-
-// ---------------------------------------------------------------------------
-int CountClosePointsBulk(const std::vector<MinimalPt>& pts,
-                         const std::vector<MinimalLine>& lines) throw()
-{
-  int ret = 0;
-
-  for(const MinimalLine& line: lines){
-    const float angleFactor = 1+sqr(line.dzdx);
-    const float maxdzsq = maxdsq * angleFactor;
-
-    int score = 0;
-    for(const MinimalPt& p: pts){
-      const float dzsq = sqr(line.dzdx*p.x + line.z0 - p.z);
-      if(dzsq < maxdzsq) score += 2-p.nTrk;
-    } // end for p
-    ret = std::max(ret, score);
-  }
-
-  return ret;
-}
-
 
 // ---------------------------------------------------------------------------
 int CountClosePoints(const View& view, const Ray& line,
@@ -550,44 +397,65 @@ Score LongestGoodSubsetHelper(const Ray& ray, const std::vector<BPPt>& pts,
   std::stable_sort(ppts.begin(), ppts.end(),
                    [](const BPPt* a, const BPPt* b){return a->privF < b->privF;});
 
-  bool inTrack = false;
-  auto start = ppts.end();
-  Score score;
+  float prevZ[3];
+  for(int v = 0; v < 3; ++v) prevZ[v] = -std::numeric_limits<float>::infinity();
+
+  std::vector<std::vector<const BPPt*>::iterator> starts, ends;
+
+  // Find all the places the track might start
+  for(auto it = ppts.begin(); it != ppts.end(); ++it){
+    const BPPt& pt = **it;
+    // TODO is it certain z-ordering and lambda ordering match (no?). Possibly
+    // store the z position of the projection to the track ray.
+    if(fabs(pt.z-prevZ[pt.view]) > maxzgap) starts.push_back(it);
+    prevZ[pt.view] = pt.z;
+  }
+
+  // Make sure we can never fall off the end of these lists
+  starts.push_back(ppts.end());
+  ends.push_back(ppts.end());
+
+  for(int v = 0; v < 3; ++v) prevZ[v] = +std::numeric_limits<float>::infinity();
+
+  // Find all the places (one after) where the track might stop
+  for(auto it = ppts.rbegin(); it != ppts.rend(); ++it){
+    const BPPt& pt = **it;
+    if(fabs(pt.z-prevZ[pt.view]) > maxzgap) ends.push_back(it.base());
+    prevZ[pt.view] = pt.z;
+  }
+
+  auto it_start = starts.begin();
+  auto it_end = ends.rbegin(); // ends are in reverse order of track direction
+
+  auto start = ppts.begin(); // start of the current candidate
+  Score score; // score of the current candidate
+
   auto bestStart = ppts.end();
   auto bestEnd = ppts.end();
   Score bestScore;
 
-  float prevLambda[3] = {ppts[0]->privF, ppts[0]->privF, ppts[0]->privF};
+  bool inTrack = false;
 
-  // Deliberately encounter ppts.end() in the loop
-  for(auto it = ppts.begin(); /*it != ppts.end()*/; ++it){
-    bool ok = (it != ppts.end());
-
-    const BPPt& pt = ok ? **it : **ppts.begin();
-
-    // Safe because if 'it' is invalid then OK is already false
-    for(int view = 0; view < 3; ++view) ok = ok && (pt.privF < prevLambda[view] + maxdL);
-
-    if(ok && !inTrack){
+  for(auto it = ppts.begin(); it != ppts.end(); ++it){
+    if(it == *it_start){
+      ++it_start;
       inTrack = true;
+      score.Reset();
       start = it;
-      //      std::cout << "Starting new track candidate at " << it-ppts.begin() << std::endl;
     }
-    else if(!ok && inTrack){
-      inTrack = false;
-      //      std::cout << "Track candidate ends at " << it-ppts.begin() << " for score " << score << std::endl;
-      if(score > bestScore){
+
+    if(it == *it_end){
+      ++it_end;
+      if(inTrack && score > bestScore){
+        inTrack = false;
         bestScore = score;
         bestStart = start;
         bestEnd = it;
       }
-      score.Reset();
     }
 
-    if(it == ppts.end()) break;
-
-    prevLambda[pt.view] = pt.privF;
     if(inTrack){
+      const BPPt& pt = **it;
       const float dsq = pt.ray.SqrDistanceToRay(ray);
 
       score.Increment(pt.view, 2-pt.nTrk);
@@ -756,6 +624,8 @@ Ray BestRay(const std::array<View, 3>& views,
     } // end for vi
   } // end while
 
+  std::cout << "nAttempts " << nAttempts << ", lastProg " << lastProg << std::endl;
+
   return bestRay;
 }
 
@@ -863,8 +733,8 @@ void AddArtTrack(const FinalTrack& trk,
   const MyVec r1 = trk.ray.Origin() + trk.lambda1 * trk.ray.Dir();
 
   std::vector<geo::Point_t> tps;
-  tps.emplace_back(r0.x, r0.y, r0.z);
-  tps.emplace_back(r1.x, r1.y, r1.z);
+  tps.emplace_back(r0.x * sigmax, r0.y * sigmaz, r0.z * sigmaz);
+  tps.emplace_back(r1.x * sigmax, r1.y * sigmaz, r1.z * sigmaz);
 
   const recob::TrackTrajectory traj(std::move(tps),
                                     std::vector<geo::Vector_t>(tps.size()), // momenta
@@ -878,7 +748,7 @@ void AddArtTrack(const FinalTrack& trk,
 void AddSpacePoint(const MyVec& sp,
                    std::vector<recob::SpacePoint>* spscol)
 {
-  const double xyz[3] = {sp.x, sp.y, sp.z};
+  const double xyz[3] = {sp.x * sigmax, sp.y * sigmaz, sp.z * sigmaz};
   const double exyz[6] = {0, 0, 0, 0, 0, 0};
   spscol->emplace_back(xyz, exyz, 0);
 }
@@ -896,6 +766,24 @@ void QuadPts::produce(art::Event& evt)
 
   std::vector<UnitVec> dirs, perps;
   std::vector<BPPt> pts3d = GetPts3D(*hits, geom, detprop, &dirs, &perps);
+
+  for(BPPt& pt: pts3d){
+    // Rewrite to sigmas
+    pt = BPPt(MyVec(pt.ray.Origin().x / sigmax,
+                    pt.ray.Origin().y / sigmaz,
+                    pt.ray.Origin().z / sigmaz),
+              MyVec(pt.ray.Dir().X() / sigmax,
+                    pt.ray.Dir().Y() / sigmaz,
+                    pt.ray.Dir().Z() / sigmaz),
+              pt.view, pt.hitIdx);
+
+    // Recalculate, but should have been safe to scale
+    pt.z = perps[pt.view].Dot(pt.ray.Origin());
+  }
+
+  // No need to scale dirs and perps. They're already unit vectors in a space
+  // that is being scaled uniformly
+
   const std::vector<BPPt> pts3d_all = pts3d;
 
   for(int i = 0; i < 3; ++i){
