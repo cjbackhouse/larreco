@@ -28,16 +28,16 @@
 #include "lardata/DetectorInfoServices/DetectorPropertiesService.h"
 
 //#include "Breakpoint.h"
-#include "Util.h"
-#include "MyVec.h"
-#include "Ray.h"
-#include "BPPt.h"
+#include "larreco/QuadPts/Util.h"
+#include "larreco/QuadPts/MyVec.h"
+#include "larreco/QuadPts/Ray.h"
+#include "larreco/QuadPts/BPPt.h"
+#include "larreco/QuadPts/Score.h"
+#include "larreco/QuadPts/FastRand.h"
 
 #include "TDecompLU.h"
 #include "TMatrixD.h"
 #include "TVectorD.h"
-
-#include "FastRand.h"
 
 //template<class T> inline T sqr(T x){return x*x;}
 #define sqr(x) ((x)*(x))
@@ -53,7 +53,8 @@ const float maxdsq = sqr(maxd);
 const float maxzgap = 5; // in terms of sigmaz
 
 
-const int kMinMatch = 6;//10;//20; // Don't make tracks smaller than this
+const int kMinPerView = 2; // Don't make tracks smaller than this
+const int kMinTotal = 6;
 
 
 namespace quad
@@ -335,49 +336,6 @@ double ProjectPointToTrackLambda(const Ray& ray, const BPPt& pt)
   return dos.Dot(n1) / ray.Dir().Dot(n1);
 }
 
-// TODO also score a chisq so that an identical count which is closer to the points is preferred
-class Score
-{
-public:
-  Score() {Reset();}
-
-  int GetMin() const {return std::min(fVal[0], std::min(fVal[1], fVal[2]));}
-  int GetTot() const {return fVal[0]+fVal[1]+fVal[2];}
-  float GetTotDist() const {return fDist[0]+fDist[1]+fDist[2];}
-
-  void Increment(int idx, int delta = 1) {fVal[idx] += delta;}
-  void IncrementDist(int idx, float delta) {fDist[idx] += delta;}
-  void Reset() {fVal[0] = fVal[1] = fVal[2] = 0; fDist[0] = fDist[1] = fDist[2] = 0;}
-
-
-  bool operator<(const Score& s) const
-  {
-    const int m = GetMin(), sm = s.GetMin();
-    if(m != sm) return m < sm;
-    const int t = GetTot(), st = s.GetTot();
-    if(t != st) return t < st;
-    return GetTotDist() > s.GetTotDist(); // NB large dist is bad
-  }
-
-  bool operator>(const Score& s) const
-  {
-    const int m = GetMin(), sm = s.GetMin();
-    if(m != sm) return m > sm;
-    const int t = GetTot(), st = s.GetTot();
-    if(t != st) return t > st;
-    return GetTotDist() < s.GetTotDist(); // NB large dist is bad
-  }
-protected:
-  std::array<int, 3> fVal;
-  std::array<float, 3> fDist;
-};
-
-std::ostream& operator<<(std::ostream& os, const Score& s)
-{
-  os << s.GetMin() << " (" << s.GetTot() << ", " << s.GetTotDist() << ")";
-  return os;
-}
-
 // TODO allow one additional hit of each view at the end of track - think about
 // symmetry of the algorithm
 Score LongestGoodSubsetHelper(const Ray& ray, const std::vector<BPPt>& pts,
@@ -473,13 +431,15 @@ Score LongestGoodSubsetHelper(const Ray& ray, const std::vector<BPPt>& pts,
 }
 
 
-std::vector<BPPt> LongestGoodSubset(const Ray& ray, std::vector<BPPt>& pts)
+std::vector<BPPt> LongestGoodSubset(const Ray& ray, std::vector<BPPt>& pts,
+                                    Score* score = 0)
 {
   std::vector<BPPt> trk_pts, reject_pts;
   trk_pts.reserve(pts.size());
   reject_pts.reserve(pts.size());
-  const Score score = LongestGoodSubsetHelper(ray, pts, &trk_pts, &reject_pts);
-  if(score.GetMin() < kMinMatch) return {};
+  const Score ret = LongestGoodSubsetHelper(ray, pts, &trk_pts, &reject_pts);
+  if(score) *score = ret;
+
   pts.swap(reject_pts);
   return trk_pts;
 }
@@ -804,9 +764,9 @@ void QuadPts::produce(art::Event& evt)
     }
 
     // Skip any event with a very small view
-    if(mpts[0].size() < kMinMatch ||
-       mpts[1].size() < kMinMatch ||
-       mpts[2].size() < kMinMatch) break;
+    if(mpts[0].size() < kMinPerView ||
+       mpts[1].size() < kMinPerView ||
+       mpts[2].size() < kMinPerView) break;
 
     const std::array<View, 3> views = {View(mpts[0], dirs[0], perps[0]),
                                        View(mpts[1], dirs[1], perps[1]),
@@ -817,11 +777,12 @@ void QuadPts::produce(art::Event& evt)
     std::vector<BPPt> trkpts = ExtractClosePoints(bestRay, pts3d);
     std::cout << "Found " << trkpts.size() << " 3D points close to track" << std::endl;
     const unsigned int nClose = trkpts.size();
-    std::vector<BPPt> goodtrkpts = LongestGoodSubset(bestRay, trkpts);
+    Score score;
+    std::vector<BPPt> goodtrkpts = LongestGoodSubset(bestRay, trkpts, &score);
 
     std::cout << goodtrkpts.size() << " points good of " << nClose << std::endl;
-    if(goodtrkpts.empty()){
-      std::cout << "No run in track exceeded " << kMinMatch << std::endl;
+    if(score.GetMin() < kMinPerView || score.GetTot() < kMinTotal){
+      std::cout << "Best score " << score << " not good enough" << std::endl;
       break;
 
       /*
