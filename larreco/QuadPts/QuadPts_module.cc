@@ -326,6 +326,52 @@ std::vector<BPPt> ExtractClosePointsCopy(const Ray& ray,
   return ret;
 }
 
+// ---------------------------------------------------------------------------
+std::vector<BPPt> ExtractClosePointsCopy_vec(const Ray& ray,
+                                             const std::array<View, 3>& views,
+                                             const std::array<std::vector<BPPt>, 3>& pts,
+                                             const std::array<std::vector<v4f>, 3>& z_arrs,
+                                             const std::array<std::vector<v4f>, 3>& x_arrs) throw()
+{
+  static std::vector<BPPt> ret;
+  ret.clear();
+
+  for(int v = 0; v < 3; ++v){
+    const View& view = views[v];
+
+    const v4f* __restrict__ z_arr = &z_arrs[v].front();
+    const v4f* __restrict__ x_arr = &x_arrs[v].front();
+
+    const float dzdx = ray.Dir().Dot(view.perp) / ray.Dir().X();
+    const float z0 = ray.Origin().Dot(view.perp) - dzdx * ray.Origin().x;
+
+    const float angleFactor = 1+sqr(dzdx);
+    const float maxdzsq = maxdsq * angleFactor;
+
+    const unsigned int N = (pts[v].size()+kBlockSize-1)/kBlockSize; // round up
+
+    for(unsigned int i = 0; i < N; ++i){
+      v4f zs = z_arr[i];
+      v4f xs = x_arr[i];
+
+      v4f dzsqs = sqr(dzdx*xs + z0 - zs);
+
+      v4i test = dzsqs < maxdzsq;
+
+      if(test[0] || test[1] || test[2] || test[3]){
+        for(int j = 0; j < kBlockSize; ++j){
+          if(test[j]){
+            const unsigned int idx = i*kBlockSize+j;
+            if(idx < pts[v].size()) ret.push_back(pts[v][idx]);
+          }
+        } // end for j
+      }
+    } // end for i
+  } // end for v
+
+  return ret;
+}
+
 
 double ProjectPointToTrackLambda(const Ray& ray, const BPPt& pt)
 {
@@ -567,7 +613,7 @@ Ray BestRay(const std::array<View, 3>& views,
       // TODO is it worthwhile reusing any of the info from these calls for
       // ExtractClosePoints?
 
-      const Score score3d = CountLongestGoodSubset(ray, ExtractClosePointsCopy(ray, pts_by_view));
+      const Score score3d = CountLongestGoodSubset(ray, ExtractClosePointsCopy_vec(ray, views, pts_by_view, z_arr, x_arr));
 
       if(score3d > bestScore){
         lastProg = nAttempts;
